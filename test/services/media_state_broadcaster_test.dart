@@ -240,12 +240,22 @@ void main() {
       );
     });
 
-    test('forward with null duration treats max as zero (cant advance past 0)',
+    test('forward with null duration advances instead of resetting to zero',
         () {
-      // current 0 + step 5 → target 5, but max is zero → clamp to zero.
+      // Regression: an unknown duration was treated as Duration.zero, so any
+      // positive step clamped "backwards" and fast-forward rewound the book.
+      expect(
+        clampedForward(
+          const Duration(hours: 1, minutes: 42),
+          null,
+          const Duration(seconds: 30),
+        ),
+        const Duration(hours: 1, minutes: 42, seconds: 30),
+      );
+      // Also covers the original zero-position case.
       expect(
         clampedForward(Duration.zero, null, const Duration(seconds: 5)),
-        Duration.zero,
+        const Duration(seconds: 5),
       );
     });
 
