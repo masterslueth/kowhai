@@ -76,9 +76,16 @@ android {
         release {
             // Use the = syntax to be absolutely direct
             signingConfig = signingConfigs.getByName("release")
-            
-            isMinifyEnabled = false
-            isShrinkResources = false
+
+            // R8 strips the APK down so the shipped binary is not a readable
+            // copy of the app. These were both false, which shipped every
+            // class name, string constant and endpoint verbatim.
+            // NOTE: R8 failures surface at RUNTIME, not build time. The keeps
+            // in proguard-rules.pro must be verified by installing a release
+            // build on a device before publishing (same caveat as the
+            // path_provider NDK pin in pubspec.yaml).
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
 

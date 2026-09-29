@@ -38,10 +38,29 @@ class _AboutScreenState extends State<AboutScreen> {
     });
   }
 
-  Future<void> _open(String url) => launchUrl(
-        Uri.parse(url),
-        mode: LaunchMode.externalApplication,
+  /// Opens [url] in an external app, refusing anything that is not plain web
+  /// HTTP(S).
+  ///
+  /// `launchUrl(mode: externalApplication)` dispatches an implicit VIEW intent
+  /// with whatever scheme the URI carries, so a tampered or unexpected
+  /// `html_url` from the releases API could otherwise hand `javascript:`,
+  /// `intent:` or a `file:` URI to another app. The manifest `<queries>` block
+  /// only gates `canLaunchUrl` visibility — it does not restrict dispatch.
+  Future<void> _open(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    const allowed = {'http', 'https'};
+    if (!allowed.contains(uri.scheme.toLowerCase())) {
+      debugPrint('[Kowhai:About] refusing to open non-web scheme: ${uri.scheme}');
+      return;
+    }
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
+        mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't open that link.")),
       );
+    }
+  }
 
   /// Returns true if [latest] is a newer semver than [installed].
   bool _isNewer(String installed, String latest) {

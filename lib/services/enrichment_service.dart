@@ -250,10 +250,18 @@ class EnrichmentService {
 
     final coverId = docs.first['cover_i'];
     if (coverId == null) return null;
+    if (coverId is! num) {
+      // Only a numeric Open Library cover id is meaningful. Anything else is
+      // unexpected upstream data and must not reach a URL or a path.
+      _log('Unexpected cover_i type: ${coverId.runtimeType}');
+      return null;
+    }
 
-    return await _downloadCover(coverId.toString());
+    return await _downloadCover(coverId.toInt().toString());
   }
 
+  /// [coverId] is validated as a non-negative integer by the caller before it
+  /// gets here, so it is safe to interpolate into a URL path and a filename.
   Future<String?> _downloadCover(String coverId) async {
     final coverResp = await _client
         .get(Uri.parse(

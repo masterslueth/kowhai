@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12L+ backup/transfer policy for Kōwhai.
+
+  Everything is excluded. The app's private data is a complete record of what
+  the user listens to: the `positions` table (per-book resume points, the last
+  played book, derived finished/started status), the `bookmarks` table with
+  free-text user notes, and SharedPreferences holding the chosen library path
+  and Drive folder IDs.
+
+  Default behaviour (no `dataExtractionRules`) would have allowed all of that
+  into cloud backup and device-to-device transfer, so both the modern rules and
+  the pre-12 `fullBackupContent` flag are set to exclude everything.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="file" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="file" />
+    </device-transfer>
+</data-extraction-rules>

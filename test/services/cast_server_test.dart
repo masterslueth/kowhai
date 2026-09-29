@@ -216,4 +216,109 @@ void main() {
       expect(server.sessionToken, isNot(firstToken));
     });
   });
+
+  group('CastServer.isLocalNetwork', () {
+    test('accepts loopback', () {
+      expect(CastServer.isLocalNetwork(InternetAddress('127.0.0.1')), isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('::1')), isTrue);
+    });
+
+    test('accepts RFC1918 private ranges', () {
+      expect(CastServer.isLocalNetwork(InternetAddress('10.1.2.3')), isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('172.16.0.5')), isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('172.31.255.255')),
+          isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('192.168.1.50')),
+          isTrue);
+    });
+
+    test('accepts link-local', () {
+      expect(CastServer.isLocalNetwork(InternetAddress('169.254.10.1')),
+          isTrue);
+    });
+
+    test('rejects public addresses', () {
+      expect(CastServer.isLocalNetwork(InternetAddress('8.8.8.8')), isFalse);
+      expect(CastServer.isLocalNetwork(InternetAddress('1.1.1.1')), isFalse);
+      // 172.15 and 172.32 sit just outside 172.16.0.0/12.
+      expect(CastServer.isLocalNetwork(InternetAddress('172.15.0.1')), isFalse);
+      expect(CastServer.isLocalNetwork(InternetAddress('172.32.0.1')), isFalse);
+      // 100.64.0.0/10 CGNAT is not RFC1918.
+      expect(CastServer.isLocalNetwork(InternetAddress('100.64.0.1')), isFalse);
+    });
+
+    test('rejects IPv6 unique-local and link-local pass, global fails', () {
+      expect(CastServer.isLocalNetwork(InternetAddress('fd00::1')), isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('fe80::1')), isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('2606:4700::1')),
+          isFalse);
+    });
+
+    test('maps IPv4-mapped IPv6 back to the v4 rules', () {
+      expect(CastServer.isLocalNetwork(InternetAddress('::ffff:192.168.0.1')),
+          isTrue);
+      expect(CastServer.isLocalNetwork(InternetAddress('::ffff:8.8.8.8')),
+          isFalse);
+    });
+
+    test('null address is rejected', () {
+      expect(CastServer.isLocalNetwork(null), isFalse);
+    });
+  });
+
+  group('CastServer idle auto-shutdown', () {
+    test('server stops itself after the idle timeout', () async {
+      final idleServer = CastServer();
+      final dir = await Directory.systemTemp.createTemp('cast_idle');
+      final file = File('${dir.path}/a.mp3');
+      await file.writeAsBytes(List.filled(2048, 0));
+      addTearDown(() async {
+        await idleServer.stop();
+        try {
+          await dir.delete(recursive: true);
+        } catch (_) {}
+      });
+
+      final prev = CastServer.idleTimeout;
+      CastServer.idleTimeout = const Duration(milliseconds: 120);
+      addTearDown(() => CastServer.idleTimeout = prev);
+
+      await idleServer.start([file.path]);
+      expect(idleServer.isRunning, isTrue);
+
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      // A session that ends without an explicit stop must not keep streaming.
+      expect(idleServer.isRunning, isFalse);
+      expect(idleServer.sessionToken, isEmpty);
+    });
+
+    test('active requests keep the server alive', () async {
+      final liveServer = CastServer();
+      final dir = await Directory.systemTemp.createTemp('cast_alive');
+      final file = File('${dir.path}/a.mp3');
+      await file.writeAsBytes(List.filled(2048, 0));
+      addTearDown(() async {
+        await liveServer.stop();
+        try {
+          await dir.delete(recursive: true);
+        } catch (_) {}
+      });
+
+      final prev = CastServer.idleTimeout;
+      CastServer.idleTimeout = const Duration(milliseconds: 150);
+      addTearDown(() => CastServer.idleTimeout = prev);
+
+      final base = Uri.parse(await liveServer.start([file.path]));
+      final token = liveServer.sessionToken;
+
+      // Poll faster than the idle window; the timer must keep being deferred.
+      for (var i = 0; i < 6; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        final r = await http.get(base.resolve('/$token/audio/0'));
+        expect(r.statusCode, 200);
+      }
+      expect(liveServer.isRunning, isTrue);
+    });
+  });
 }
