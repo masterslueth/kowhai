@@ -250,18 +250,22 @@ class PositionService {
 
   Future<void> updateBookStatus(String bookPath, BookStatus status) async {
     final db = await _database;
-    // Only update status column if the row already exists, otherwise insert.
-    final existing = await db.query('positions',
-        where: 'book_path = ?', whereArgs: [bookPath], limit: 1);
-    if (existing.isEmpty) {
+    // UPDATE first, and only insert when it changed nothing. The previous
+    // SELECT-then-branch was a read-modify-write with no transaction: two
+    // concurrent callers (e.g. _onPlaybackCompleted racing play()) could both
+    // observe isEmpty, and a savePosition landing between the SELECT and the
+    // UPDATE made the branch decision stale. Semantics are unchanged - the
+    // update path still deliberately does NOT bump updated_at, since an
+    // explicit status change is not a listen event and must not reorder the
+    // library by recency.
+    final changed = await db.update(
+      'positions',
+      {'status': status.name},
+      where: 'book_path = ?',
+      whereArgs: [bookPath],
+    );
+    if (changed == 0) {
       await setBookStatus(bookPath, status);
-    } else {
-      await db.update(
-        'positions',
-        {'status': status.name},
-        where: 'book_path = ?',
-        whereArgs: [bookPath],
-      );
     }
   }
 

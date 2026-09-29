@@ -70,7 +70,7 @@ void main() {
 
     test('truncation never yields an empty name', () {
       expect(safeFsName('a.${'b' * 200}'), isNotEmpty);
-      expect(safeFsName('${'a' * 500}'), isNotEmpty);
+      expect(safeFsName('a' * 500), isNotEmpty);
     });
 
     test('handles unicode names without mangling', () {

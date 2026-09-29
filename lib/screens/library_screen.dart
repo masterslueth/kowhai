@@ -52,7 +52,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Map<String, BookStatus> _statuses = {};
   String? _error;
   bool _syncing = false;
-  String _scanStatus = 'Scanning your libraryâ€¦';
+  String _scanStatus = 'Scanning your library…';
   bool _hasLocalFolder = false;
   bool _hasDriveConfigured = false;
   Set<String> _syncFoundPaths = {};
@@ -113,6 +113,10 @@ Timer? _searchDebounce;
       _playbackSub = _audioHandler.playbackState.listen((state) {
         final newPath = _audioHandler.currentBook?.path;
         if (newPath != _activePath || state.playing != _isPlaying) {
+          // playbackState is an audio_service broadcast subject that fires on
+          // every state transition; the tracker listener above guards with
+          // mounted and this one did not.
+          if (!mounted) return;
           setState(() {
             _activePath = newPath;
             _isPlaying = state.playing;
@@ -178,7 +182,7 @@ Timer? _searchDebounce;
     if (mounted) {
       setState(() {
         _sortOrder = LibrarySortOrder.fromName(sortName);
-        // Reset to `all` if Drive is not connected â€” the filter is meaningless
+        // Reset to `all` if Drive is not connected — the filter is meaningless
         // without a Drive account and the section won't be shown in the UI.
         _availabilityFilter = driveConnected ? availFilter : AvailabilityFilterState.all;
         _statusFilter = statusFilter;
@@ -186,8 +190,12 @@ Timer? _searchDebounce;
       });
     }
     final shouldScan = widget.initialSyncDrive || await prefs.getRefreshOnStartup();
+    // The await above sits AFTER the mounted check, so the screen may be gone
+    // by now. _scan() does an unconditional setState and keeps a full
+    // filesystem scan running, so bail here rather than inside it.
+    if (!mounted) return;
     // Always load previously discovered books so the library isn't empty on
-    // launch. When refresh-on-startup is off, skip the Drive network sync â€”
+    // launch. When refresh-on-startup is off, skip the Drive network sync —
     // cached Drive books still load from the DB.
     _scan(syncWithDrive: shouldScan);
   }
@@ -200,13 +208,13 @@ Timer? _searchDebounce;
     _rawBooks ??= [];
     final idx = _rawBooks!.indexWhere((b) => b.path == book.path);
     if (idx == -1) {
-      // New book â€” optimistic append to both lists (sort applied at end).
+      // New book — optimistic append to both lists (sort applied at end).
       setState(() {
         _rawBooks = [..._rawBooks!, book];
         _books = [...(_books ?? []), book];
       });
     } else {
-      // Existing book â€” refresh metadata in place without reordering.
+      // Existing book — refresh metadata in place without reordering.
       setState(() {
         _rawBooks = List.from(_rawBooks!)..[idx] = book;
       });
@@ -217,7 +225,7 @@ Timer? _searchDebounce;
     _syncFoundPaths = {};
     setState(() {
       _syncing = true;
-      _scanStatus = 'Scanning your libraryâ€¦';
+      _scanStatus = 'Scanning your library…';
       _error = null;
       // Intentionally NOT clearing _rawBooks or _books so existing
       // books remain visible while the resync runs in the background.
@@ -225,9 +233,9 @@ Timer? _searchDebounce;
     try {
       final path = await locator<PreferencesService>().getLibraryPath();
 
-      // No local folder â€” the wait is entirely on Drive, so say so.
+      // No local folder — the wait is entirely on Drive, so say so.
       if (path == null && mounted) {
-        setState(() => _scanStatus = 'Checking Google Driveâ€¦');
+        setState(() => _scanStatus = 'Checking Google Drive…');
       }
 
       // Exclude Drive-managed dirs from local scan to avoid double-counting
@@ -275,7 +283,7 @@ Timer? _searchDebounce;
       final enrichEnabled = await locator<PreferencesService>().getMetadataEnrichment();
 
       if (mounted && enrichEnabled) {
-        setState(() => _scanStatus = 'Loading coversâ€¦');
+        setState(() => _scanStatus = 'Loading covers…');
       }
 
       // Apply cached enriched covers only when enrichment is enabled.
@@ -293,7 +301,7 @@ Timer? _searchDebounce;
       setState(() => _syncing = false);
 
       // Start background enrichment for books missing covers.
-      if (enrichEnabled) {
+      if (enrichEnabled && mounted) {
         unawaited(locator<EnrichmentService>().enqueueBooks(_rawBooks!));
       }
 
@@ -301,6 +309,10 @@ Timer? _searchDebounce;
       // appears immediately on launch (without auto-playing).
       if (_audioHandler.currentBook == null) {
         final lastPath = await locator<PositionService>().getLastPlayedBookPath();
+        // The handler is a PROCESS-LIFETIME singleton: loading a book here
+        // would change now-playing state for a screen the user has left, so
+        // re-check after the await.
+        if (!mounted) return;
         if (lastPath != null) {
           final allBooks = [...(_rawBooks ?? []), ...driveBooks];
           final book = allBooks.where((b) => b.path == lastPath).firstOrNull;
@@ -326,7 +338,34 @@ Timer? _searchDebounce;
   }
 
   /// Loads positions from DB, sorts books, and updates state.
+  ///
+  /// Guarded against re-entrancy: this is invoked from four sites, two of
+  /// which do not await it (`_onCoverFetched`, `_refreshDriveBook`). Overlapping
+  /// invocations each snapshot `_rawBooks` and race, so the one finishing last
+  /// wins with whichever snapshot it took — which may be the staler one. The
+  /// loser also produced an unhandled async error, since nothing awaited it.
   Future<void> _applySort() async {
+    if (_sortInFlight) {
+      // Coalesce: remember that a re-sort was requested while busy so it runs
+      // again with the latest data once this pass completes.
+      _sortPending = true;
+      return;
+    }
+    _sortInFlight = true;
+    try {
+      do {
+        _sortPending = false;
+        await _applySortOnce();
+      } while (_sortPending && mounted);
+    } finally {
+      _sortInFlight = false;
+    }
+  }
+
+  bool _sortInFlight = false;
+  bool _sortPending = false;
+
+  Future<void> _applySortOnce() async {
     final raw = _rawBooks;
     if (raw == null) return;
 
@@ -351,9 +390,10 @@ Timer? _searchDebounce;
 
     // Prefetch formatted download sizes for Drive books that aren't fully
     // downloaded, so list tiles can show them without firing requests during
-    // build. The cache map makes this idempotent across re-sorts.
+    // build. The cache map makes this idempotent across re-sorts. Batched into
+    // the single setState below rather than one rebuild per book.
     for (final b in all) {
-      await _ensureDownloadSizeLabel(b);
+      await _ensureDownloadSizeLabel(b, commit: false);
     }
 
     if (!mounted) return;
@@ -495,7 +535,7 @@ Future<void> _refreshDriveBook(String folderId) async {
       if (result == true) {
         _scan();
       } else if (result is String) {
-        // Drive book was undownloaded â€” result is the folderId.
+        // Drive book was undownloaded — result is the folderId.
         _refreshDriveBook(result);
       } else {
         _applySort();
@@ -588,7 +628,7 @@ Future<void> _refreshDriveBook(String folderId) async {
                   });
                 },
                 decoration: InputDecoration(
-                  hintText: 'Search by title or authorâ€¦',
+                  hintText: 'Search by title or author…',
                   prefixIcon: const Icon(Icons.search_rounded),
                   suffixIcon: _searchQuery.isNotEmpty
                       ? IconButton(
@@ -694,7 +734,15 @@ Future<void> _refreshDriveBook(String folderId) async {
 
     final books = _displayedBooks;
 
-    if (books.isEmpty && _statusFilter == null && _searchQuery.isEmpty) {
+    // The availability filter is a real, persisted, user-selectable filter
+    // (it is even summarised in the view bar), so it has to be part of this
+    // condition. Excluding it sent the user to the "check your folder layout"
+    // dead end with no way to clear the filter in place, instead of the
+    // no-matches view that offers the escape.
+    if (books.isEmpty &&
+        _statusFilter == null &&
+        _searchQuery.isEmpty &&
+        _availabilityFilter == AvailabilityFilterState.all) {
       return const Center(
         child: Padding(
           padding: EdgeInsets.all(32),
@@ -815,7 +863,11 @@ Future<void> _refreshDriveBook(String folderId) async {
 
   /// Fetches and caches the formatted download size for a Drive book that
   /// hasn't been fully downloaded yet. No-op if already cached or not applicable.
-  Future<void> _ensureDownloadSizeLabel(Audiobook book) async {
+  ///
+  /// [commit] is false while _applySort's prefetch loop is running, so the
+  /// whole batch lands in one setState instead of one full-library rebuild
+  /// (and a re-run of the entire filter pipeline) per Drive book.
+  Future<void> _ensureDownloadSizeLabel(Audiobook book, {bool commit = true}) async {
     if (book.source != AudiobookSource.drive) return;
     final meta = book.driveMetadata;
     if (meta == null) return;
@@ -826,9 +878,12 @@ Future<void> _refreshDriveBook(String folderId) async {
     if (_downloadSizeLabels.containsKey(book.path)) return;
 
     final sizeBytes = await locator<DriveLibraryService>().totalSizeBytes(meta.folderId);
+    if (sizeBytes <= 0) return;
     if (!mounted) return;
-    if (sizeBytes > 0) {
+    if (commit) {
       setState(() => _downloadSizeLabels[book.path] = formatBytes(sizeBytes));
+    } else {
+      _downloadSizeLabels[book.path] = formatBytes(sizeBytes);
     }
   }
 

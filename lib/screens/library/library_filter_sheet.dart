@@ -36,6 +36,14 @@ Future<void> showLibraryFilterSheet(
 
   final driveConnected = locator<DriveService>().currentAccount != null;
 
+  // Local selection state. The parameters above are `final` and captured by
+  // the builder closure, so setSheetState(() {}) re-ran the builder against
+  // the ORIGINAL arguments: the pill highlight never moved and canClear stayed
+  // false, leaving "Clear all" permanently disabled for the life of the sheet.
+  // The write-through callbacks below keep the parent in sync.
+  var currentStatus = statusFilter;
+  var currentAvailability = availabilityFilter;
+
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -44,8 +52,8 @@ Future<void> showLibraryFilterSheet(
         final theme = Theme.of(sheetCtx);
         final maxHeight = MediaQuery.of(sheetCtx).size.height * 0.75;
 
-        final canClear = statusFilter != null ||
-            availabilityFilter != AvailabilityFilterState.all;
+        final canClear = currentStatus != null ||
+            currentAvailability != AvailabilityFilterState.all;
 
         return SafeArea(
           child: ConstrainedBox(
@@ -91,12 +99,12 @@ Future<void> showLibraryFilterSheet(
                             _pill(
                               context: sheetCtx,
                               label: 'All ($allCount)',
-                              selected: statusFilter == null,
+                              selected: currentStatus == null,
                               onTap: () {
                                 onStatusChanged(null);
                                 locator<PreferencesService>()
                                     .setStatusFilter(null);
-                                setSheetState(() {});
+                                setSheetState(() => currentStatus = null);
                               },
                             ),
                             for (final s in BookStatus.values)
@@ -104,12 +112,12 @@ Future<void> showLibraryFilterSheet(
                                 context: sheetCtx,
                                 label:
                                     '${statusLabelOf(s)} (${statusCounts[s] ?? 0})',
-                                selected: statusFilter == s,
+                                selected: currentStatus == s,
                                 onTap: () {
                                   onStatusChanged(s);
                                   locator<PreferencesService>()
                                       .setStatusFilter(s);
-                                  setSheetState(() {});
+                                  setSheetState(() => currentStatus = s);
                                 },
                               ),
                           ],
@@ -132,7 +140,7 @@ Future<void> showLibraryFilterSheet(
                                 context: sheetCtx,
                                 label:
                                     'All (${availCounts[AvailabilityFilterState.all] ?? 0})',
-                                selected: availabilityFilter ==
+                                selected: currentAvailability ==
                                     AvailabilityFilterState.all,
                                 onTap: () {
                                   onAvailabilityChanged(
@@ -140,7 +148,8 @@ Future<void> showLibraryFilterSheet(
                                   locator<PreferencesService>()
                                       .setAvailabilityFilter(
                                           AvailabilityFilterState.all);
-                                  setSheetState(() {});
+                                  setSheetState(() => currentAvailability =
+                                      AvailabilityFilterState.all);
                                 },
                               ),
                               if (hasDriveBooks) ...[
@@ -148,22 +157,24 @@ Future<void> showLibraryFilterSheet(
                                   context: sheetCtx,
                                   label:
                                       'Available offline (${availCounts[AvailabilityFilterState.availableOffline] ?? 0})',
-                                  selected: availabilityFilter ==
+                                  selected: currentAvailability ==
                                       AvailabilityFilterState.availableOffline,
                                   onTap: () {
-                                    onAvailabilityChanged(AvailabilityFilterState
-                                        .availableOffline);
+                                    onAvailabilityChanged(
+                                        AvailabilityFilterState.availableOffline);
                                     locator<PreferencesService>()
-                                        .setAvailabilityFilter(AvailabilityFilterState
-                                            .availableOffline);
-                                    setSheetState(() {});
+                                        .setAvailabilityFilter(
+                                            AvailabilityFilterState
+                                                .availableOffline);
+                                    setSheetState(() => currentAvailability =
+                                        AvailabilityFilterState.availableOffline);
                                   },
                                 ),
                                 _pill(
                                   context: sheetCtx,
                                   label:
                                       'Drive only (${availCounts[AvailabilityFilterState.driveOnly] ?? 0})',
-                                  selected: availabilityFilter ==
+                                  selected: currentAvailability ==
                                       AvailabilityFilterState.driveOnly,
                                   onTap: () {
                                     onAvailabilityChanged(
@@ -171,7 +182,8 @@ Future<void> showLibraryFilterSheet(
                                     locator<PreferencesService>()
                                         .setAvailabilityFilter(
                                             AvailabilityFilterState.driveOnly);
-                                    setSheetState(() {});
+                                    setSheetState(() => currentAvailability =
+                                        AvailabilityFilterState.driveOnly);
                                   },
                                 ),
                               ],
@@ -192,7 +204,11 @@ Future<void> showLibraryFilterSheet(
                                   prefs.setStatusFilter(null);
                                   prefs.setAvailabilityFilter(
                                       AvailabilityFilterState.all);
-                                  setSheetState(() {});
+                                  setSheetState(() {
+                                    currentStatus = null;
+                                    currentAvailability =
+                                        AvailabilityFilterState.all;
+                                  });
                                 }
                               : null,
                         ),

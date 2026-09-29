@@ -106,7 +106,7 @@ class DriveService {
       }
       if (_account != null) debugPrint('[Drive] Session restored');
     } catch (_) {
-      // No previous session or token expired â€” user will sign in manually.
+      // No previous session or token expired — user will sign in manually.
     }
   }
 
