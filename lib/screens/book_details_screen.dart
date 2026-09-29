@@ -501,8 +501,14 @@ class _BookmarksSectionState extends State<_BookmarksSection> {
 
   Future<void> _delete(Bookmark bookmark) async {
     if (!mounted) return;
+    // Dismissible asserts that the dismissed item has left the list by the
+    // end of the onDismissed frame. Reloading from the DB two awaits later
+    // left the row in the tree, which trips
+    // 'A dismissed Dismissible widget is still part of the tree' (and is
+    // guaranteed to rebuild, since the undo snackbar is shown on this
+    // screen's own Scaffold). Drop it from local state synchronously.
+    setState(() => _bookmarks?.removeWhere((b) => b.id == bookmark.id));
     await deleteBookmarkWithUndo(context, bookmark);
-    await _load();
   }
 
   void _jumpTo(BuildContext context, Bookmark bookmark) {

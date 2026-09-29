@@ -216,6 +216,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       currentSpeed: _speed,
       audioHandler: _audioHandler,
     ).then((newSpeed) {
+      // The sheet's route has just popped; the screen may be gone.
+      if (!mounted) return;
       setState(() => _speed = newSpeed);
     });
   }
@@ -970,8 +972,10 @@ class _BookmarksSheetState extends State<_BookmarksSheet> {
 
   Future<void> _delete(Bookmark bookmark) async {
     if (!mounted) return;
+    // See book_details_screen._delete: the item must leave the list within
+    // the onDismissed frame or Dismissible asserts it is still in the tree.
+    setState(() => _bookmarks?.removeWhere((b) => b.id == bookmark.id));
     await deleteBookmarkWithUndo(context, bookmark);
-    await _load();
   }
 
   void _jumpTo(Bookmark bookmark) {

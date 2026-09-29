@@ -34,6 +34,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           : 0.0;
       entries.add((book: book, pct: pct, updatedAt: p.updatedAt));
     }
+    if (!mounted) return;
     setState(() => _entries = entries);
   }
 

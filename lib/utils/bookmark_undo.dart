@@ -18,7 +18,15 @@ Future<void> deleteBookmarkWithUndo(
   BuildContext context,
   Bookmark bookmark,
 ) async {
-  await locator<PositionService>().deleteBookmark(bookmark.id!);
+  // `Bookmark.id` is nullable: a bookmark constructed in memory (or restored
+  // from an older export without the column) has no row to delete, and the
+  // old `bookmark.id!` threw an unhandled null-check error on that path.
+  final id = bookmark.id;
+  if (id == null) {
+    debugPrint('[Kowhai:Bookmark] delete skipped: bookmark has no id');
+    return;
+  }
+  await locator<PositionService>().deleteBookmark(id);
 
   if (!context.mounted) return;
   final messenger = ScaffoldMessenger.maybeOf(context);
