@@ -198,6 +198,78 @@ void main() {
       expect(s.isComplete, isFalse);
     });
 
+    test('an error clears anyDownloading so the spinner does not stick',
+        () async {
+      // Regression: the error branch left anyDownloading at the value set by
+      // the preceding 'downloading' event, and nothing re-seeds on that path,
+      // so the folder stayed in downloadingFolders indefinitely and the UI
+      // showed a live progress indicator for a terminally failed download.
+      final tracker = makeTracker({
+        'f1': [_file(0, size: 100), _file(1, size: 100)],
+      });
+      await tracker.ensureSeeded('f1');
+
+      events.add(DriveDownloadEvent(
+          folderId: 'f1',
+          fileIndex: 1,
+          state: DriveDownloadState.downloading,
+          bytesDownloaded: 90));
+      await Future<void>.delayed(Duration.zero);
+      expect(tracker.snapshotFor('f1')!.anyDownloading, isTrue);
+      expect(tracker.downloadingFolders.value.contains('f1'), isTrue);
+
+      events.add(DriveDownloadEvent(
+          folderId: 'f1', fileIndex: 1, state: DriveDownloadState.error));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(tracker.snapshotFor('f1')!.anyDownloading, isFalse);
+      expect(tracker.downloadingFolders.value.contains('f1'), isFalse);
+    });
+
+    test('a duplicate done event for the same file is not double-counted',
+        () async {
+      // Regression: done incremented unconditionally per event, so a
+      // duplicate could push downloadedCount past totalCount and latch
+      // isComplete permanently true.
+      final tracker = makeTracker({
+        'f1': [_file(0, size: 100), _file(1, size: 100)],
+      });
+      var completions = 0;
+      tracker.onBookCompleted = (_) async => completions++;
+      await tracker.ensureSeeded('f1');
+
+      for (var i = 0; i < 3; i++) {
+        events.add(DriveDownloadEvent(
+            folderId: 'f1',
+            fileIndex: 1,
+            state: DriveDownloadState.done,
+            fileSizeBytes: 100));
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      final s = tracker.snapshotFor('f1')!;
+      expect(s.downloadedCount, 1, reason: 'only one file actually finished');
+      expect(s.doneBytes, 100);
+      expect(s.isComplete, isFalse);
+      expect(completions, 0);
+    });
+
+    test('forget releases tracker state for a removed book', () async {
+      final tracker = makeTracker({
+        'f1': [_file(0, size: 100, state: 'downloading')],
+      });
+      await tracker.ensureSeeded('f1');
+      final notifier = tracker.listenableFor('f1');
+      expect(tracker.downloadingFolders.value.contains('f1'), isTrue);
+
+      tracker.forget('f1');
+
+      expect(tracker.snapshotFor('f1'), isNull);
+      expect(tracker.downloadingFolders.value.contains('f1'), isFalse);
+      // A fresh notifier is created on next request; the old one is disposed.
+      expect(identical(tracker.listenableFor('f1'), notifier), isFalse);
+    });
+
     test('cover-only events do not move book progress', () async {
       final tracker = makeTracker({
         'f1': [_file(0, size: 100)],

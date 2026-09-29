@@ -207,6 +207,9 @@ class DriveLibraryService {
       final hasDownloaded = files.any((f) => f.downloadState == DriveDownloadState.done);
       if (!hasDownloaded) {
         await _repo.deleteDriveBook(record.folderId);
+        // Release the tracker's per-book notifier too; nothing can be
+        // listening any more because the book is leaving the library.
+        _tracker.forget(record.folderId);
       }
     }
   }

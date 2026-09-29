@@ -31,7 +31,18 @@ class BookDownloadProgress {
     this.currentFileBytes = 0,
     this.anyDownloading = false,
     this.lastEventError = false,
+    this.completedFileIndices = const {},
+    this.inFlightFileIndices = const {},
   });
+
+  /// File indices already counted as done, so a duplicate `done` event for the
+  /// same file cannot inflate the counters.
+  final Set<int> completedFileIndices;
+
+  /// File indices with a download currently in flight. Lets `anyDownloading`
+  /// be recomputed exactly when one finishes or fails, instead of being left
+  /// at whatever the last `downloading` event set it to.
+  final Set<int> inFlightFileIndices;
 
   /// 0.0-1.0 aggregate byte progress; 0 when total size unknown.
   double get overallProgress {
@@ -49,6 +60,8 @@ class BookDownloadProgress {
     int? currentFileBytes,
     bool? anyDownloading,
     bool? lastEventError,
+    Set<int>? completedFileIndices,
+    Set<int>? inFlightFileIndices,
   }) =>
       BookDownloadProgress(
         folderId: folderId,
@@ -59,6 +72,9 @@ class BookDownloadProgress {
         currentFileBytes: currentFileBytes ?? this.currentFileBytes,
         anyDownloading: anyDownloading ?? this.anyDownloading,
         lastEventError: lastEventError ?? this.lastEventError,
+        completedFileIndices:
+            completedFileIndices ?? this.completedFileIndices,
+        inFlightFileIndices: inFlightFileIndices ?? this.inFlightFileIndices,
       );
 }
 
@@ -128,6 +144,22 @@ class DownloadProgressTracker {
   FolderProgressNotifier listenableFor(String folderId) =>
       _notifiers.putIfAbsent(folderId, FolderProgressNotifier.new);
 
+  /// Drops all tracker state for [folderId] and disposes its notifier.
+  ///
+  /// Notifiers are created on demand by [listenableFor] and otherwise only
+  /// released in [dispose], so a book's notifier (and its listener
+  /// registrations) outlived the book itself for the life of the process.
+  /// Only call this once the book is gone from the library — disposing a
+  /// notifier a mounted widget is still listening to would throw.
+  void forget(String folderId) {
+    _notifiers.remove(folderId)?.dispose();
+    _snapshots.remove(folderId);
+    _seeding.remove(folderId);
+    if (downloadingFolders.value.contains(folderId)) {
+      downloadingFolders.value = {...downloadingFolders.value}..remove(folderId);
+    }
+  }
+
   BookDownloadProgress? snapshotFor(String folderId) => _snapshots[folderId];
 
   /// Lazily seeds [folderId] from the repository if not yet tracked.
@@ -165,14 +197,19 @@ class DownloadProgressTracker {
     final done = files
         .where((f) => f.downloadState == DriveDownloadState.done)
         .toList(growable: false);
+    final inFlight = files
+        .where((f) => f.downloadState == DriveDownloadState.downloading)
+        .map((f) => f.fileIndex)
+        .toSet();
     _snapshots[folderId] = BookDownloadProgress(
       folderId: folderId,
       downloadedCount: done.length,
       totalCount: files.length,
       doneBytes: done.fold<int>(0, (s, f) => s + f.sizeBytes),
       totalBytes: files.fold<int>(0, (s, f) => s + f.sizeBytes),
-      anyDownloading: files
-          .any((f) => f.downloadState == DriveDownloadState.downloading),
+      completedFileIndices: {for (final f in done) f.fileIndex},
+      inFlightFileIndices: inFlight,
+      anyDownloading: inFlight.isNotEmpty,
     );
     _syncDownloadingSet(folderId);
   }
@@ -188,23 +225,40 @@ class DownloadProgressTracker {
     }
     final s = _snapshots[e.folderId];
     var next = s ?? BookDownloadProgress(folderId: e.folderId);
+    // Non-null: the cover-only path above already returned when it was null.
+    final fileIndex = e.fileIndex!;
 
     switch (e.state) {
       case DriveDownloadState.downloading:
+        final inFlight = {...next.inFlightFileIndices, fileIndex};
         next = next.copyWith(
           currentFileBytes: e.bytesDownloaded ?? 0,
-          anyDownloading: true,
+          inFlightFileIndices: inFlight,
+          anyDownloading: inFlight.isNotEmpty,
           lastEventError: false,
         );
         break;
       case DriveDownloadState.done:
         final wasComplete = next.isComplete;
+        // Guard against double-counting: a duplicate `done` for a fileIndex
+        // already recorded (re-download after a reset, or a book re-queued
+        // with an index already done) used to increment unconditionally, which
+        // could push downloadedCount past totalCount and latch isComplete
+        // permanently true - firing onBookCompleted against a
+        // half-downloaded book.
+        if (next.completedFileIndices.contains(fileIndex)) {
+          _storeAndEmit(e.folderId, next);
+          return;
+        }
+        final inFlight = {...next.inFlightFileIndices}..remove(fileIndex);
         next = next.copyWith(
           downloadedCount: next.downloadedCount + 1,
+          completedFileIndices: {...next.completedFileIndices, fileIndex},
           doneBytes: next.doneBytes + (e.fileSizeBytes ?? 0),
           currentFileBytes: 0,
+          inFlightFileIndices: inFlight,
           anyDownloading: next.downloadedCount + 1 < next.totalCount &&
-              _remainingBusy(e.folderId),
+              inFlight.isNotEmpty,
           lastEventError: false,
         );
         _storeAndEmit(e.folderId, next);
@@ -214,18 +268,23 @@ class DownloadProgressTracker {
         }
         return;
       case DriveDownloadState.error:
-        next = next.copyWith(currentFileBytes: 0, lastEventError: true);
+        // anyDownloading is recomputed from the in-flight set rather than left
+        // at the value the preceding 'downloading' event set. It previously
+        // stuck at true, so _syncDownloadingSet kept the folder in
+        // downloadingFolders forever and the UI showed a live spinner for a
+        // terminally failed download - nothing re-seeds on this path.
+        final inFlight = {...next.inFlightFileIndices}..remove(fileIndex);
+        next = next.copyWith(
+          currentFileBytes: 0,
+          inFlightFileIndices: inFlight,
+          anyDownloading: inFlight.isNotEmpty,
+          lastEventError: true,
+        );
         break;
       case DriveDownloadState.none:
         break;
     }
     _storeAndEmit(e.folderId, next);
-  }
-
-  // Files still marked 'downloading' elsewhere in the DB (multi-queue).
-  bool _remainingBusy(String folderId) {
-    final s = _snapshots[folderId];
-    return s?.anyDownloading ?? false;
   }
 
   void _storeAndEmit(String folderId, BookDownloadProgress next) {
@@ -254,6 +313,10 @@ class DownloadProgressTracker {
 
   void dispose() {
     _sub?.cancel();
+    // Nulled so a later attach() does not silently no-op on a cancelled
+    // (non-null) subscription, which left the tracker deaf to events with no
+    // error anywhere — progress simply stopped updating.
+    _sub = null;
     for (final n in _notifiers.values) {
       n.dispose();
     }
