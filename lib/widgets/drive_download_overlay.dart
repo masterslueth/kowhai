@@ -51,7 +51,15 @@ class _DriveDownloadOverlayState extends State<DriveDownloadOverlay> {
     _notifier = _tracker.listenableFor(folderId)..addListener(_onChange);
   }
 
-  void _onChange() => setState(() {});
+  // listenableFor returns a PROCESS-LIFETIME notifier shared by every overlay
+  // for the same folder, and this widget is instantiated inside
+  // GridView.builder / ListView.separated items — so hundreds of States
+  // attach and detach on it during ordinary scrolling. A download event
+  // landing mid-teardown would otherwise call setState on a defunct State.
+  void _onChange() {
+    if (!mounted) return;
+    setState(() {});
+  }
 
   @override
   void didUpdateWidget(DriveDownloadOverlay oldWidget) {

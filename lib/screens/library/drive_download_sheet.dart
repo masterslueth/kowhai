@@ -15,12 +15,18 @@ import '../../utils/formatters.dart';
 ///
 /// The optional [connectivityOverride] parameter is used by tests to inject a
 /// known connectivity state without hitting the real network stack.
-Future<void> showDriveDownloadSheet(
+///
+/// Returns when the sheet is dismissed — the modal future is returned, not
+/// fire-and-forget. The sibling [showDriveDownloadProgressSheet] already had
+/// that contract; returning early here meant every `await
+/// showDriveDownloadSheet(...)` completed while the sheet was still open.
+Future<bool?> showDriveDownloadSheet(
   BuildContext context,
   Audiobook book, {
   List<ConnectivityResult>? connectivityOverride,
 }) async {
-  final folderId = book.driveMetadata!.folderId;
+  final folderId = book.driveMetadata?.folderId;
+  if (folderId == null) return null;
 
   final connectivity =
       connectivityOverride ?? await Connectivity().checkConnectivity();
@@ -31,9 +37,9 @@ Future<void> showDriveDownloadSheet(
   final sizeBytes =
       await locator<DriveLibraryService>().totalSizeBytes(folderId);
 
-  if (!context.mounted) return;
+  if (!context.mounted) return null;
 
-  showModalBottomSheet<void>(
+  return showModalBottomSheet<bool>(
     context: context,
     builder: (ctx) => Padding(
       padding: const EdgeInsets.all(24),
@@ -88,7 +94,8 @@ Future<bool?> showDriveDownloadProgressSheet(
   BuildContext context,
   Audiobook book,
 ) async {
-  final folderId = book.driveMetadata!.folderId;
+  final folderId = book.driveMetadata?.folderId;
+  if (folderId == null) return null;
   final tracker = locator<DownloadProgressTracker>();
   await tracker.ensureSeeded(folderId);
 
@@ -119,6 +126,14 @@ class _DownloadProgressSheet extends StatefulWidget {
 class _DownloadProgressSheetState extends State<_DownloadProgressSheet> {
   late final FolderProgressNotifier _notifier;
 
+  /// Latched once the sheet has asked to close. The tracker re-emits after
+  /// the first completion (onBookCompleted → _refreshDriveBook → promoteToLocal
+  /// → reseed → notifyListeners), and the sheet stays `mounted` for the whole
+  /// ~250 ms route exit animation — so without this a second emission ran
+  /// `Navigator.pop` again and popped the route BENEATH the sheet, ejecting
+  /// the user out of the library.
+  bool _closing = false;
+
   @override
   void initState() {
     super.initState();
@@ -127,12 +142,15 @@ class _DownloadProgressSheetState extends State<_DownloadProgressSheet> {
   }
 
   void _onChange() {
+    if (!mounted) return;
     final p = _notifier.value;
-    if (p != null && p.isComplete && mounted) {
+    if (p != null && p.isComplete) {
+      if (_closing) return;
+      _closing = true;
       Navigator.pop(context, false);
-    } else {
-      setState(() {});
+      return;
     }
+    setState(() {});
   }
 
   @override

@@ -442,7 +442,13 @@ Future<void> _refreshDriveBook(String folderId) async {
     // Drive book: ensure files are available and metadata is fully populated
     if (book.source == AudiobookSource.drive &&
         (book.audioFiles.isEmpty || book.chapterDurations.isEmpty)) {
-      final folderId = book.driveMetadata!.folderId;
+      final folderId = book.driveMetadata?.folderId;
+      if (folderId == null) {
+        // A Drive-sourced book with no folder metadata cannot be resolved.
+        // The model documents this state as reachable, and book_details_screen
+        // handles it as a non-Drive boundary rather than crashing.
+        return;
+      }
       final files = await locator<DriveBookRepository>().getFilesForBook(folderId);
       final allDone = files.isNotEmpty &&
           files.every((f) => f.downloadState == DriveDownloadState.done);

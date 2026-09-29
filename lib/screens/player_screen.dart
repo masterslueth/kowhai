@@ -87,15 +87,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       // For multi-file books there are no embedded chapters, so the track
       // index IS the chapter index and _posSub is not subscribed.
       _chapterSub = _audioHandler.player.currentIndexStream.listen((idx) {
-        if (idx == null) return;
+        if (idx == null || !mounted) return;
         if (widget.book.chapters.isEmpty && idx != _currentChapterIndex) {
           setState(() => _currentChapterIndex = idx);
         }
         if (idx != _lastChapterIndex) {
-          if (_sleepCtrl.stopAtChapterEnd.value) {
-            _audioHandler.pause();
-            _cancelTimer();
-          }
+          _stopAtChapterEndIfArmed();
           setState(() => _lastChapterIndex = idx);
         }
       });
@@ -113,11 +110,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
           if (!mounted) return;
           final idx = widget.book.chapterIndexAt(pos);
           if (idx != _currentChapterIndex) {
-            setState(() => _currentChapterIndex = idx);
+            setState(() {
+              _currentChapterIndex = idx;
+              // Kept in step with the M4B path so the end-of-chapter guard
+              // below can tell a genuine boundary crossing from the initial
+              // sample.
+              _lastChapterIndex = idx;
+            });
           }
+          // "End of chapter" has to be honoured here too. For M4B the track
+          // index is always 0, so the check in _chapterSub never fires and
+          // the feature silently did nothing for the app's primary format:
+          // the chip showed "End of ch." and playback ran to the end of the
+          // book.
+          _stopAtChapterEndIfArmed(chapterIndex: idx);
         });
       }
     }
+  }
+
+  /// Pauses and disarms the sleep timer if "stop at end of chapter" is armed.
+  ///
+  /// Called from BOTH chapter-detection paths: the track-index stream (multi-
+  /// file books) and the position stream (M4B). [chapterIndex] is passed only
+  /// to let the M4B path skip the first sample, which reports the chapter the
+  /// player restored INTO rather than a chapter boundary.
+  void _stopAtChapterEndIfArmed({int? chapterIndex}) {
+    if (!_sleepCtrl.stopAtChapterEnd.value) return;
+    if (chapterIndex != null && chapterIndex == _lastChapterIndex) return;
+    _audioHandler.pause();
+    _cancelTimer();
   }
 
   Future<void> _loadBook() async {
@@ -354,7 +376,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final nameCtrl = TextEditingController();
     final notesCtrl = TextEditingController();
 
-    await showDialog<void>(
+    // These are locals in a plain async function, not a State, so nothing
+    // else would ever dispose them. Every "Add bookmark" leaked two
+    // controllers (text buffer + listener registrations).
+    try {
+      await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Add bookmark'),
@@ -416,7 +442,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
         ],
       ),
-    );
+      );
+    } finally {
+      nameCtrl.dispose();
+      notesCtrl.dispose();
+    }
   }
 
   // ── Build ────────────────────────────────────────────────────────────────────
@@ -709,11 +739,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         remaining -= chapMs;
                         idx = i + 1;
                       }
-                      idx = idx.clamp(0, book.audioFiles.length - 1);
-                      _audioHandler.player.seek(
-                        Duration(milliseconds: remaining),
-                        index: idx,
-                      );
+                      // num.clamp throws ArgumentError when lowerLimit >
+                      // upperLimit, so an empty audioFiles list would crash
+                      // here rather than clamp.
+                      if (book.audioFiles.isNotEmpty) {
+                        idx = idx.clamp(0, book.audioFiles.length - 1);
+                        _audioHandler.player.seek(
+                          Duration(milliseconds: remaining),
+                          index: idx,
+                        );
+                      } else {
+                        _audioHandler.seek(Duration(milliseconds: globalMs));
+                      }
                     } else {
                       _audioHandler.seek(Duration(milliseconds: globalMs));
                     }
@@ -986,10 +1023,21 @@ class _BookmarksSheetState extends State<_BookmarksSheet> {
           .seek(Duration(milliseconds: bookmark.positionMs));
     } else {
       // Multi-file: seek to the start of the chapter file, then offset.
+      // chapterIndex is persisted in the DB and restored verbatim. If the
+      // book's files were removed or renamed since the bookmark was written,
+      // it can exceed the loaded sequence, and just_audio's
+      // seek(Duration, index:) asserts on that. Clamped to what exists.
+      final maxIndex = widget.audioHandler.player.sequence.length - 1;
+      if (maxIndex < 0) {
+        Navigator.pop(context);
+        return;
+      }
+      final index = bookmark.chapterIndex.clamp(0, maxIndex);
+      final startMs = _chapterStartMs(book, index);
       widget.audioHandler.player.seek(
-        Duration(milliseconds: bookmark.positionMs -
-            _chapterStartMs(book, bookmark.chapterIndex)),
-        index: bookmark.chapterIndex,
+        Duration(milliseconds: (bookmark.positionMs - startMs)
+            .clamp(0, Duration(milliseconds: bookmark.positionMs).inMilliseconds)),
+        index: index,
       );
     }
     widget.audioHandler.play();

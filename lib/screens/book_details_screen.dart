@@ -236,7 +236,19 @@ class _ActionButtonsState extends State<_ActionButtons> {
     );
     if (confirmed != true || !context.mounted) return;
 
-    final folderId = widget.book.driveMetadata!.folderId;
+    // `driveMetadata` is nullable and the model documents that it is non-null
+    // only when source == drive — i.e. the type system says this can be null
+    // under exactly the condition that leads here. See the R14 guard at the
+    // top of build() for the same boundary handled as a non-Drive case.
+    final folderId = widget.book.driveMetadata?.folderId;
+    if (folderId == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Couldn't identify this Drive book.")),
+        );
+      }
+      return;
+    }
     final dlManager = locator<DriveDownloadManager>();
     final driveLib = locator<DriveLibraryService>();
     await dlManager.cancelDownload(folderId);
@@ -274,21 +286,31 @@ class _ActionButtonsState extends State<_ActionButtons> {
             // was open. Re-fetch from the service to get the actual file paths.
             var bookToPlay = widget.book;
             if (isDrive && bookToPlay.audioFiles.isEmpty) {
-              final folderId = bookToPlay.driveMetadata!.folderId;
-              final fresh =
-                  await locator<DriveLibraryService>().promoteToLocal(folderId);
-              if (fresh != null) {
-                bookToPlay = fresh;
+              final folderId = bookToPlay.driveMetadata?.folderId;
+              if (folderId == null) {
+                // Same boundary as above: no Drive folder means there is
+                // nothing to promote from. Fall through to the DB-only load.
+                final dbOnly = await locator<DriveLibraryService>()
+                    .loadDriveBooks();
+                final match = dbOnly.firstWhereOrNull(
+                    (b) => b.path == bookToPlay.path);
+                if (match == null) return;
+                bookToPlay = match;
               } else {
-                // promoteToLocal failed (e.g. scan error or path mismatch) —
-                // fall back to DB-only load which at least provides audio paths.
-                final dbBooks =
-                    await locator<DriveLibraryService>().loadDriveBooks();
-                final dbBook = dbBooks.firstWhereOrNull(
-                  (b) => b.driveMetadata?.folderId == folderId,
-                );
-                if (dbBook != null && dbBook.audioFiles.isNotEmpty) {
-                  bookToPlay = dbBook;
+                final fresh = await locator<DriveLibraryService>()
+                    .promoteToLocal(folderId);
+                if (fresh != null) {
+                  bookToPlay = fresh;
+                } else {
+                  // promoteToLocal failed (e.g. scan error or path mismatch) —
+                  // fall back to DB-only load which at least provides audio paths.
+                  final dbBooks =
+                      await locator<DriveLibraryService>().loadDriveBooks();
+                  final dbBook = dbBooks.firstWhereOrNull(
+                      (b) => b.driveMetadata?.folderId == folderId);
+                  if (dbBook != null && dbBook.audioFiles.isNotEmpty) {
+                    bookToPlay = dbBook;
+                  }
                 }
               }
             }
@@ -518,14 +540,22 @@ class _BookmarksSectionState extends State<_BookmarksSection> {
     if (isM4b) {
       ah.seek(Duration(milliseconds: bookmark.positionMs));
     } else {
+      // Clamp: chapterIndex is persisted and restored verbatim, so a book
+      // whose files changed since the bookmark was written can yield an index
+      // outside the loaded sequence, which just_audio's seek asserts on.
+      final maxIndex = ah.player.sequence.length - 1;
+      if (maxIndex < 0) return;
+      final index = bookmark.chapterIndex.clamp(0, maxIndex);
       final startMs = calculateGlobalPosition(
-        chapterIndex: bookmark.chapterIndex,
+        chapterIndex: index,
         chapterPosition: Duration.zero,
         chapterDurations: book.chapterDurations,
       );
       ah.player.seek(
-        Duration(milliseconds: bookmark.positionMs - startMs),
-        index: bookmark.chapterIndex,
+        Duration(
+            milliseconds:
+                (bookmark.positionMs - startMs).clamp(0, bookmark.positionMs)),
+        index: index,
       );
     }
     ah.play();
