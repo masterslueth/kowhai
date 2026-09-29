@@ -180,5 +180,103 @@ void main() {
       final chapters = await M4bChapterParser.parseChapters(path);
       expect(chapters, isEmpty);
     });
+
+    // ── Malformed input hardening ───────────────────────────────────────────
+    //
+    // Box sizes and table counts come straight from the file. Before the caps
+    // these were unvalidated uint32s, so a tiny crafted file could force a
+    // multi-gigabyte allocation and OOM the isolate mid-scan.
+
+    test('box declaring a huge size does not trigger a huge allocation',
+        () async {
+      // A `chpl` box header claiming ~2 GiB of payload in a ~16 byte file.
+      final header = Uint8List(8);
+      final bd = ByteData.sublistView(header);
+      bd.setUint32(0, 0x7FFFFFFF, Endian.big);
+      header[4] = 'c'.codeUnitAt(0);
+      header[5] = 'h'.codeUnitAt(0);
+      header[6] = 'p'.codeUnitAt(0);
+      header[7] = 'l'.codeUnitAt(0);
+
+      final path = await _writeTempFile(tempDir, header);
+      final chapters = await M4bChapterParser.parseChapters(path);
+      expect(chapters, isEmpty);
+    });
+
+    test('stsz sample count near 2^32 is clamped', () async {
+      // moov > trak > (mdhd, stsz with sample_count = 0xFFFFFFFF)
+      final mdhd = _box('mdhd', _buildMdhd());
+      final stsz = _box('stsz', _buildStsz(0xFFFFFFFF, 0));
+      final stts = _box('stts', _buildStts(0xFFFFFFFF, 1024));
+      final stco = _box('stco', _buildChunkTable(0));
+      final minf = _containerBox('minf', [mdhd, stsz, stts, stco]);
+      final gmhd = _containerBox('gmhd', [_box('chap', Uint8List(0))]);
+      final trak = _containerBox('trak', [gmhd, minf]);
+      final moov = _containerBox('moov', [trak]);
+
+      final path = await _writeTempFile(tempDir, moov);
+      // Completing without an OOM is the assertion.
+      final chapters = await M4bChapterParser.parseChapters(path);
+      expect(chapters, isEmpty);
+    });
+
+    test('stts run length near 2^32 does not expand billions of entries',
+        () async {
+      final mdhd = _box('mdhd', _buildMdhd());
+      // One run declaring 0xFFFFFFFF samples at a nonzero delta.
+      final stts = _box('stts', _buildStts(1, 1024, runCount: 0xFFFFFFFF));
+      final stsz = _box('stsz', _buildStsz(16, 1024));
+      final stco = _box('stco', _buildChunkTable(1));
+      final minf = _containerBox('minf', [mdhd, stsz, stts, stco]);
+      final gmhd = _containerBox('gmhd', [_box('chap', Uint8List(0))]);
+      final trak = _containerBox('trak', [gmhd, minf]);
+      final moov = _containerBox('moov', [trak]);
+
+      final path = await _writeTempFile(tempDir, moov);
+      final chapters = await M4bChapterParser.parseChapters(path);
+      expect(chapters, isEmpty);
+    });
   });
+}
+
+/// Minimal `mdhd` payload: version 0, timescale at offset 12.
+Uint8List _buildMdhd() {
+  final data = ByteData(24);
+  data.setUint8(0, 0); // version
+  data.setUint32(12, 44100, Endian.big); // timescale
+  return data.buffer.asUint8List();
+}
+
+/// `stsz` payload: [4]=default sample size, [8]=sample count, [12..]=sizes.
+Uint8List _buildStsz(int sampleCount, int defaultSize) {
+  final data = ByteData(12);
+  data.setUint32(4, defaultSize, Endian.big);
+  data.setUint32(8, sampleCount, Endian.big);
+  return data.buffer.asUint8List();
+}
+
+/// `stts` payload: [4]=entry count, then (count, delta) pairs.
+Uint8List _buildStts(int entries, int delta, {int? runCount}) {
+  final b = BytesBuilder();
+  b.add(Uint8List(8));
+  final head = ByteData(4)..setUint32(0, entries, Endian.big);
+  b.add(head.buffer.asUint8List());
+  final pair = ByteData(8)
+    ..setUint32(0, runCount ?? 1, Endian.big)
+    ..setUint32(4, delta, Endian.big);
+  b.add(pair.buffer.asUint8List());
+  return b.toBytes();
+}
+
+/// `stco` payload: [4]=chunk count, then 4-byte offsets.
+Uint8List _buildChunkTable(int chunks) {
+  final b = BytesBuilder();
+  b.add(Uint8List(8));
+  final head = ByteData(4)..setUint32(0, chunks, Endian.big);
+  b.add(head.buffer.asUint8List());
+  for (var i = 0; i < chunks; i++) {
+    final off = ByteData(4)..setUint32(0, 0, Endian.big);
+    b.add(off.buffer.asUint8List());
+  }
+  return b.toBytes();
 }

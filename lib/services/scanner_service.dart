@@ -384,7 +384,11 @@ class ScannerService {
       chapters = await M4bChapterParser.parseChapters(audioFiles.first);
       _log('    M4B chapters: ${chapters.length}');
     } else if (cueSheet != null && cueSheet.chapters.isNotEmpty) {
-      chapters = cueSheet.chapters;
+      // Sorted ascending: Audiobook.chapterIndexAt binary-searches on
+      // Chapter.start assuming both parsers emit monotonic chapters. A
+      // hand-authored cue with out-of-order INDEX lines must not break that.
+      chapters = List.of(cueSheet.chapters)
+        ..sort((a, b) => a.start.compareTo(b.start));
       _log('    CUE chapters: ${chapters.length}');
     }
 
@@ -486,6 +490,10 @@ class ScannerService {
     String? currentFilePath; // null if file was missing from disk
     final pendingChapters = <Chapter>[];
     String? pendingTrackTitle;
+    // Disc/album title seen in the current FILE section before any TRACK;
+    // the first one is retained as a book-title fallback.
+    var sawTrackInSection = false;
+    String? firstSectionTitle;
 
     void commitFile() {
       if (currentFilePath != null) {
@@ -497,6 +505,7 @@ class ScannerService {
       pendingChapters.clear();
       currentFilePath = null;
       pendingTrackTitle = null;
+      sawTrackInSection = false;
     }
 
     for (var line in content.split('\n')) {
@@ -510,13 +519,18 @@ class ScannerService {
         if (match == null) continue;
         // Normalise path separators for the current platform.
         final filename = match.group(1)!.replaceAll('\\', p.separator);
-        final resolved = p.join(folderPath, filename);
-        currentFilePath = File(resolved).existsSync() ? resolved : null;
+        currentFilePath = _resolveCueFile(folderPath, filename);
         pendingTrackTitle = null;
       } else if (line.startsWith('TITLE ')) {
         final title = _cueUnquote(line.substring(6));
+        // Red Book cue grammar: the FIRST TITLE inside a FILE section is the
+        // disc/album title; any TITLE that follows a TRACK line is that
+        // track's name. Without the TRACK gate, chapter 1 inherited the book
+        // title instead of its own name.
         if (currentFilePath == null && fileSections.isEmpty) {
           globalTitle = title;
+        } else if (!sawTrackInSection) {
+          firstSectionTitle ??= title;
         } else {
           pendingTrackTitle = title;
         }
@@ -525,6 +539,8 @@ class ScannerService {
         if (currentFilePath == null && fileSections.isEmpty) {
           globalPerformer = performer;
         }
+      } else if (line.startsWith('TRACK ') || line.startsWith('TRACK\t')) {
+        sawTrackInSection = true;
       } else if (line.startsWith('INDEX 01 ') && pendingTrackTitle != null) {
         final dur = _parseCueTime(line.substring(9).trim());
         if (dur != null && currentFilePath != null) {
@@ -546,7 +562,9 @@ class ScannerService {
         : const <Chapter>[];
 
     return _CueSheet(
-      title: globalTitle,
+      // Some sheets carry no global TITLE but do declare a per-FILE disc
+      // title; fall back to it rather than dropping the metadata entirely.
+      title: globalTitle ?? firstSectionTitle,
       author: globalPerformer,
       audioFiles: audioPaths,
       chapters: chapters,
@@ -562,7 +580,30 @@ class ScannerService {
     return s;
   }
 
+  /// Resolves a cue `FILE` reference to an existing path INSIDE [root].
+  ///
+  /// The reference is read from file *contents*, so it is untrusted input.
+  /// `p.join` normalises `..` segments, so a crafted cue sheet such as
+  /// `FILE "../../../../data/data/com.app/files/secret.mp3" WAVE` would
+  /// otherwise walk out of the book folder and hand an arbitrary absolute path
+  /// to the metadata reader and the playback engine. Absolute references are
+  /// rejected outright, and the normalised candidate must still resolve under
+  /// [root]. Returns null when the reference escapes or the file is absent.
+  String? _resolveCueFile(String root, String filename) {
+    if (p.isAbsolute(filename)) return null;
+    final normalizedRoot = p.normalize(p.absolute(root));
+    final candidate = p.normalize(p.absolute(p.join(root, filename)));
+    // p.relative emits '..' segments exactly when the candidate escapes root.
+    final rel = p.relative(candidate, from: normalizedRoot);
+    if (rel == '..' || rel.startsWith('..${p.separator}')) return null;
+    return File(candidate).existsSync() ? candidate : null;
+  }
+
   /// Parses a CUE timestamp `MM:SS:FF` (75 frames/sec) to [Duration].
+  ///
+  /// Each field is range-checked. `int.tryParse` happily accepts a leading
+  /// `-`, and a negative `Chapter.start` breaks the ascending-order
+  /// precondition that [Audiobook.chapterIndexAt]'s binary search relies on.
   Duration? _parseCueTime(String s) {
     final parts = s.split(':');
     if (parts.length != 3) return null;
@@ -570,6 +611,8 @@ class ScannerService {
     final ss = int.tryParse(parts[1]);
     final ff = int.tryParse(parts[2]);
     if (mm == null || ss == null || ff == null) return null;
+    if (mm < 0 || ss < 0 || ff < 0) return null;
+    if (ss > 59 || ff > 74) return null;
     return Duration(milliseconds: mm * 60000 + ss * 1000 + ff * 1000 ~/ 75);
   }
 
