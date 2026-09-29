@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import '../models/audiobook.dart';
 import '../utils/formatters.dart';
 import 'position_service.dart';
@@ -41,8 +42,22 @@ class PositionPersister {
   /// Begin saving on every [interval] tick. Idempotent — calling twice
   /// doesn't stack timers.
   void startPeriodic() {
-    _timer ??= Timer.periodic(interval, (_) => save());
+    // save() is neither awaited nor catchError'd by the timer, so a DB write
+    // failure (disk full, database closed during teardown) became an
+    // UNHANDLED async error in the timer zone - fatal in tests and invisible
+    // in release. Also skips a tick if the previous save is still in flight,
+    // so slow writes cannot pile up overlapping saves.
+    _timer ??= Timer.periodic(interval, (_) {
+      if (_saveInFlight) return;
+      _saveInFlight = true;
+      save()
+          .catchError((Object e) =>
+              debugPrint('[Kowhai:Persister] periodic save failed: $e'))
+          .whenComplete(() => _saveInFlight = false);
+    });
   }
+
+  bool _saveInFlight = false;
 
   /// Stop the periodic timer (if any). Does NOT perform a final save —
   /// callers typically want [save] right after.

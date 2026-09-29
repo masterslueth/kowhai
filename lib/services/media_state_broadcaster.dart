@@ -72,11 +72,15 @@ class MediaStateBroadcaster {
     setPlaybackState(getPlaybackState().copyWith(
       controls: _buildControls(playing),
       systemActions: const {MediaAction.seek},
-      androidCompactActionIndices: const [1, 2, 3],
+      androidCompactActionIndices: const [1, 3],
       processingState: processingState,
       playing: playing,
       updatePosition: position,
       speed: speed,
+      // Explicitly cleared: copyWith retains the previous value, so the
+      // notification kept advertising the last LOCAL track index after
+      // playback handed off to a receiver that reports no queue index.
+      queueIndex: null,
     ));
   }
 

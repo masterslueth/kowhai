@@ -171,6 +171,11 @@ class EnrichmentService {
       }
     } finally {
       _processing = false;
+      // A cancel() that landed mid-batch leaves whatever a concurrent
+      // enqueueBooks() appended stranded in _pendingBooks. Draining here
+      // means they are picked up by the next call rather than accumulating
+      // forever.
+      if (_cancelled) _pendingBooks.clear();
     }
   }
 
@@ -291,14 +296,16 @@ class EnrichmentService {
 
   Future<void> _recordAttempt(String bookPath) async {
     final db = await _database;
-    await db.insert(
-      'enrichment',
-      {
-        'book_path': bookPath,
-        'enriched': 0,
-        'last_attempted_date': DateTime.now().millisecondsSinceEpoch,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
+    // UPSERT, not ConflictAlgorithm.replace. SQLite implements REPLACE as
+    // DELETE + INSERT, so it nulled `cover_path` and `last_enriched_date` for
+    // the row. Today the caller only reaches here when enriched == 0, but any
+    // future retry of an already-enriched book would silently discard a
+    // downloaded cover path.
+    await db.rawInsert(
+      'INSERT INTO enrichment (book_path, enriched, last_attempted_date) '
+      'VALUES (?, 0, ?) '
+      'ON CONFLICT(book_path) DO UPDATE SET last_attempted_date=excluded.last_attempted_date',
+      [bookPath, DateTime.now().millisecondsSinceEpoch],
     );
   }
 
