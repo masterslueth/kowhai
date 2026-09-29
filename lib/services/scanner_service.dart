@@ -184,8 +184,10 @@ class ScannerService {
         .toList();
     if (cueFiles.isNotEmpty) {
       try {
-        final content = await cueFiles.first.readAsString();
-        cueSheet = _parseCueSheet(content, dir.path);
+        final content = await _readTextCapped(cueFiles.first);
+        if (content != null) {
+          cueSheet = _parseCueSheet(content, dir.path);
+        }
         _log('    CUE: ${cueSheet?.audioFiles.length ?? 0} file(s), '
             '${cueSheet?.chapters.length ?? 0} chapter(s)');
       } catch (e) {
@@ -243,9 +245,12 @@ class ScannerService {
         p.basename(f.path).toLowerCase() == 'metadata.opf').firstOrNull;
     if (opfFile != null) {
       try {
-        opf = parseOpf(await opfFile.readAsString());
-        _log('    OPF: found (author=${opf.author}, narrator=${opf.narrator}, '
-            'series=${opf.series})');
+        final opfText = await _readTextCapped(opfFile);
+        if (opfText != null) {
+          opf = parseOpf(opfText);
+          _log('    OPF: found (author=${opf.author}, narrator=${opf.narrator}, '
+              'series=${opf.series})');
+        }
       } catch (e) {
         _log('    OPF parse error: $e');
       }
@@ -609,6 +614,18 @@ class ScannerService {
     return File(candidate).existsSync() ? candidate : null;
   }
 
+  /// Reads [file] as a UTF-8 string, or null if it exceeds
+  /// [_maxSidecarTextBytes].
+  static Future<String?> _readTextCapped(File file) async {
+    final len = await file.length();
+    if (len > _maxSidecarTextBytes) {
+      _log('    skipping oversized sidecar ${p.basename(file.path)} '
+          '($len bytes > $_maxSidecarTextBytes)');
+      return null;
+    }
+    return file.readAsString();
+  }
+
   /// Parses a CUE timestamp `MM:SS:FF` (75 frames/sec) to [Duration].
   ///
   /// Each field is range-checked. `int.tryParse` happily accepts a leading
@@ -636,6 +653,13 @@ class ScannerService {
 /// Cap on embedded artwork bytes extracted per file. Art crosses isolate
 /// boundaries by copy; unbounded covers spike memory on low-end devices.
 const int _maxEmbeddedArtBytes = 4 * 1024 * 1024;
+
+/// Cap on a sidecar text metadata file (`.cue`, `metadata.opf`) read into
+/// memory. Real ones are a few KB; the reader then builds a full DOM/string,
+/// so an oversized file in a scanned folder would otherwise OOM the UI isolate
+/// mid-scan. Returns null when the file exceeds the cap, which degrades to
+/// "no sidecar metadata" rather than crashing.
+const int _maxSidecarTextBytes = 4 * 1024 * 1024;
 
 /// Per-file metadata extracted by [readMetadataChunk] inside a background
 /// isolate. Mirrors the subset of AudioMetadata the scanner consumes.
