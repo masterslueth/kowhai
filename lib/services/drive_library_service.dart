@@ -163,22 +163,13 @@ class DriveLibraryService {
           .where((f) => !f.name.startsWith('.'))
           .toList();
 
-      // Save book record
-      await _repo.upsertDriveBook(DriveBookRecord(
-        folderId: scan.folder.id,
-        folderName: scan.folder.name,
-        rootFolderId: rootFolder.id,
-        isShared: scan.folder.isShared,
-        accountEmail: account.email,
-        addedAt: DateTime.now().millisecondsSinceEpoch,
-        coverFileId: scan.coverFile?.id,
-        audioFileIds: audioFiles.map((f) => f.id).toList(),
-      ));
-
-      // Save file records
+      // Book record and all of its file records land in one transaction, so a
+      // cancellation part-way cannot leave a tracked book with a partial file
+      // set that rescanDrive would then skip forever.
+      final fileRecords = <DriveFileRecord>[];
       for (int i = 0; i < audioFiles.length; i++) {
         final f = audioFiles[i];
-        await _repo.upsertFile(DriveFileRecord(
+        fileRecords.add(DriveFileRecord(
           folderId: scan.folder.id,
           fileIndex: i,
           fileId: f.id,
@@ -189,6 +180,19 @@ class DriveLibraryService {
           localPath: '$dir/${safeFsName(f.name)}',
         ));
       }
+      await _repo.upsertDriveBookWithFiles(
+        DriveBookRecord(
+          folderId: scan.folder.id,
+          folderName: scan.folder.name,
+          rootFolderId: rootFolder.id,
+          isShared: scan.folder.isShared,
+          accountEmail: account.email,
+          addedAt: DateTime.now().millisecondsSinceEpoch,
+          coverFileId: scan.coverFile?.id,
+          audioFileIds: audioFiles.map((f) => f.id).toList(),
+        ),
+        fileRecords,
+      );
     }
 
     return await loadDriveBooks();
@@ -321,12 +325,7 @@ class DriveLibraryService {
   /// download state to none. Cover art is preserved. The book record is kept.
   Future<void> undownloadBook(String folderId) async {
     final files = await _repo.getFilesForBook(folderId);
-    for (final f in files) {
-      if (f.localPath != null) {
-        final file = File(f.localPath!);
-        if (await file.exists()) await file.delete();
-      }
-    }
+    await _deleteLocalFilesQuietly(files);
     await _repo.resetBookDownloads(folderId);
     await _tracker.reseed(folderId);
   }
@@ -342,13 +341,29 @@ class DriveLibraryService {
   /// metadata are preserved so the book remains in the library as finished.
   Future<void> deleteLocalFiles(String folderId) async {
     final files = await _repo.getFilesForBook(folderId);
-    for (final f in files) {
-      if (f.localPath != null) {
-        final file = File(f.localPath!);
-        if (await file.exists()) await file.delete();
-      }
-      await _repo.updateFileState(folderId, f.fileIndex, DriveDownloadState.none);
-    }
+    await _deleteLocalFilesQuietly(files);
+    await _repo.reseedFolderStates(folderId);
     await _tracker.reseed(folderId);
+  }
+
+  /// Deletes each file, isolating per-file failures.
+  ///
+  /// A single `delete()` throwing (file locked, read-only volume) previously
+  /// aborted the loop, leaving the already-deleted files still marked 'done'
+  /// in the DB. `resetStaleDownloads` only rescues 'downloading' rows, so those
+  /// files were never revisited and the library kept advertising audio files
+  /// that no longer existed.
+  Future<void> _deleteLocalFilesQuietly(List<DriveFileRecord> files) async {
+    for (final f in files) {
+      final path = f.localPath;
+      if (path != null) {
+        try {
+          final file = File(path);
+          if (await file.exists()) await file.delete();
+        } catch (e) {
+          debugPrint('[Kowhai:Drive] could not delete $path: $e');
+        }
+      }
+    }
   }
 }

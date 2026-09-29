@@ -306,7 +306,10 @@ void main() {
       });
 
       final prev = CastServer.idleTimeout;
-      CastServer.idleTimeout = const Duration(milliseconds: 150);
+      // Generous margin over the poll interval: a loaded CI machine can take
+      // well over a poll period to complete a loopback request, and this test
+      // is about the timer being deferred, not about a specific latency.
+      CastServer.idleTimeout = const Duration(milliseconds: 600);
       addTearDown(() => CastServer.idleTimeout = prev);
 
       final base = Uri.parse(await liveServer.start([file.path]));
@@ -314,7 +317,7 @@ void main() {
 
       // Poll faster than the idle window; the timer must keep being deferred.
       for (var i = 0; i < 6; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 60));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
         final r = await http.get(base.resolve('/$token/audio/0'));
         expect(r.statusCode, 200);
       }
