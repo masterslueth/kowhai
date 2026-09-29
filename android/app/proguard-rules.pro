@@ -19,8 +19,7 @@
 # ── audio_service: notification, MediaBrowserService, custom actions ─────────
 # Instantiated by name from the Android manifest and by platform-channel calls.
 -keep class com.ryanheise.audioservice.** { *; }
--keep class com.ryanheise.audioservice.**$* { *; }
--keep class extends com.ryanheise.audioservice.AudioService { *; }
+-keep class * extends com.ryanheise.audioservice.AudioService { *; }
 -keep class * extends androidx.media.session.MediaSession { *; }
 
 # ── just_audio / ExoPlayer (Media3) ─────────────────────────────────────────
@@ -44,5 +43,4 @@
 
 # ── misc plugin reflection ───────────────────────────────────────────────────
 -keep class androidx.lifecycle.** { *; }
--keep class com.ryanheise.** { *; }
 -dontwarn javax.annotation.**
