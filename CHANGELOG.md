@@ -28,6 +28,32 @@ All notable changes to Kōwhai Audiobook Player are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Fast-forward no longer rewinds the book** - When the total duration was not yet known, the skip-forward target was clamped against zero, so skipping forward from the lock screen could seek back to 0:00.
+- **Filesystem-safe filename sanitising** - A Drive filename whose "extension" was longer than the length cap made the truncation arithmetic go negative and threw, turning the sanitiser itself into a crash. A crafted `.cue` sheet can no longer reference files outside its book folder, and `.cue` chapters are validated, sorted, and no longer mislabel chapter 1 with the disc title.
+- **Malformed M4B resilience** - Box and sample-table sizes read from the file are now capped, so a small corrupt file can no longer force a multi-gigabyte allocation during a library scan.
+- **Sleep timer "end of chapter" works for M4B** - It previously only triggered for multi-file books; on M4B (single file, chapter index always 0) the option armed and displayed but never stopped playback.
+- **Bookmark swipe-delete** - Dismissing a bookmark no longer leaves it in the tree long enough to trip a framework assertion in debug builds.
+- **Drive download integrity** - Files promoted out of staging are repointed in the database before the staging copy is removed (an interrupted move used to strand the book on a path that no longer existed, permanently), Drive imports are transactional, and a failed download no longer shows a stuck progress spinner.
+- **Sleep/listen position correctness** - Opening the app, browsing, then pressing play no longer rewinds the book by the browsing time; a resume point is no longer computed past the end of a zero-length track; digit runs beyond 64 bits in filenames sort numerically.
+- **Library filter sheet** - The active-filter highlight and "Clear all" now update as you pick, and an availability filter with no matches offers a way back instead of pointing at your folder layout.
+- **Crash-free screens** - Removed `setState`-after-dispose and null-metadata crashes across settings, history, player, book details, and the Drive download surfaces.
+- **Metadata sidecar reads capped** - An oversized `.cue` or `metadata.opf` in a scanned folder degrades to "no metadata" rather than exhausting memory mid-scan.
+- Repaired garbled characters in several scan-status strings and the search hint.
+
+### Security
+- **Local file server** - The Cast streaming server now refuses peers that are not on your local network, shuts itself down when idle (a session that ended without an explicit stop used to keep serving), compares its access token without an early exit, and caps concurrent connections.
+- **Release build is minified** - R8 and resource shrinking are enabled, so the shipped APK is no longer a readable copy of the app.
+- **App data excluded from backup** - Reading history, bookmarks with your notes, and stored Drive folder references are no longer eligible for cloud backup or device transfer.
+
+### Changed
+- Foreign keys are now actually enforced, and the Drive book upsert was converted off `ConflictAlgorithm.replace` so enabling that pragma cannot cascade-delete downloaded-file rows.
+- Audio metadata is only re-published to the media session when it actually changes, rather than several times a second.
+- Google Drive metadata requests and library loads do fewer redundant database round-trips.
+
+### Under the hood
+- Static analysis pass across the codebase: ~45 defects fixed across parsing, data integrity, playback, and UI lifecycle, with regression tests added for each (suite: 462 green).
+
 ---
 
 ## [4.0.0] - 2026-08-24
