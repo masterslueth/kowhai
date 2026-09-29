@@ -365,9 +365,9 @@ class DriveDownloadManager {
 
   Future<String> _defaultDestPath(String folderId, String fileName) async {
     final dir = await getApplicationDocumentsDirectory();
-    // fileName comes from Drive metadata (user-controlled) — sanitise before
-    // it becomes a path segment.
-    return '${dir.path}/drive_books/$folderId/${safeFsName(fileName)}';
+    // Both segments are sanitised: fileName comes from Drive metadata
+    // (user-controlled) and folderId is a raw path segment from the DB.
+    return '${dir.path}/drive_books/${safeFsName(folderId)}/${safeFsName(fileName)}';
   }
 
   void dispose() {

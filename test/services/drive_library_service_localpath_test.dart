@@ -269,6 +269,60 @@ void main() {
           '${libDir.path}/$folderName/chapter.mp3');
     });
 
+    test('staging file is removed after the move (no duplicate left)', () async {
+      final (:positionService, :repo) = await _makeRepo();
+      const folderId = 'folderMoveCleanup';
+      const folderName = 'Cleanup Book';
+      final libDir = await Directory('${tempDir.path}/libCleanup').create();
+
+      await repo.upsertDriveBook(_bookRecord(folderId, folderName));
+
+      final stagingPath = '${tempDir.path}/drive_books/$folderId';
+      await Directory(stagingPath).create(recursive: true);
+      final trackFile = File('$stagingPath/chapter.mp3');
+      await trackFile.writeAsBytes([0]);
+
+      await repo.upsertFile(_fileRecord(folderId, 0, 'chapter.mp3',
+          state: DriveDownloadState.done, localPath: trackFile.path));
+
+      final service = _makeService(repo, _StubPrefs(libraryPath: libDir.path));
+      await service.promoteToLocal(folderId);
+
+      final dest = File('${libDir.path}/$folderName/chapter.mp3');
+      expect(dest.existsSync(), isTrue,
+          reason: 'destination must exist after promote');
+      expect(trackFile.existsSync(), isFalse,
+          reason: 'staging copy should be cleaned up after the move');
+    });
+
+    test('self-heals a DB row stranded on a deleted staging path', () async {
+      // Regression: the old copy→delete→update order could be interrupted
+      // between the delete and the update, leaving localPath pointing at a
+      // file that no longer existed and the book permanently unplayable.
+      final (:positionService, :repo) = await _makeRepo();
+      const folderId = 'folderStranded';
+      const folderName = 'Stranded Book';
+      final libDir = await Directory('${tempDir.path}/libStranded').create();
+
+      await repo.upsertDriveBook(_bookRecord(folderId, folderName));
+
+      // Destination already holds the real file; the staging path is gone.
+      final destDir = Directory('${libDir.path}/$folderName');
+      await destDir.create(recursive: true);
+      await File('${destDir.path}/chapter.mp3').writeAsBytes([0]);
+
+      final stagingPath = '${tempDir.path}/drive_books/$folderId';
+      await repo.upsertFile(_fileRecord(folderId, 0, 'chapter.mp3',
+          state: DriveDownloadState.done, localPath: '$stagingPath/chapter.mp3'));
+
+      final service = _makeService(repo, _StubPrefs(libraryPath: libDir.path));
+      await service.promoteToLocal(folderId);
+
+      final files = await repo.getFilesForBook(folderId);
+      expect(files[0].localPath, '${destDir.path}/chapter.mp3',
+          reason: 'DB should be repointed at the existing destination');
+    });
+
     test('skips move when no library folder is configured (staging == final)',
         () async {
       final (:positionService, :repo) = await _makeRepo();

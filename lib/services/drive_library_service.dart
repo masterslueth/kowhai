@@ -35,7 +35,11 @@ class DriveLibraryService {
   @visibleForTesting
   Future<String> stagingDir(String folderId) async {
     final docs = await getApplicationDocumentsDirectory();
-    return '${docs.path}/drive_books/$folderId';
+    // Sanitised for the same reason as folderName in bookDir: this is a raw
+    // path segment taken from a DB column, and drive_download_manager builds
+    // download destinations from it too. Drive ids are server-generated, so
+    // this is defence in depth rather than an active exposure.
+    return '${docs.path}/drive_books/${safeFsName(folderId)}';
   }
 
   /// Returns the final local directory for a Drive book.
@@ -48,6 +52,9 @@ class DriveLibraryService {
       if (localPath != null && localPath.isNotEmpty) {
         // Drive folder names are user-controlled — sanitise so a hostile name
         // (e.g. containing `/` or `..`) cannot escape the library root.
+        // Separator style is kept as-is: ScannerService normalises both sides
+        // of the exclusion comparison, so a forward-slash join still matches
+        // the backslash paths Directory.list() reports on Windows.
         return '$localPath/${safeFsName(folderName)}';
       }
     }
@@ -227,14 +234,30 @@ class DriveLibraryService {
       for (final f in files) {
         if (f.downloadState != DriveDownloadState.done || f.localPath == null) continue;
         final destPath = '$finalDir/${safeFsName(f.fileName)}';
-        if (f.localPath != destPath) {
-          final srcFile = File(f.localPath!);
-          if (await srcFile.exists()) {
-            await srcFile.copy(destPath);
-            await srcFile.delete();
-            await _repo.updateFileLocalPath(folderId, f.fileIndex, destPath);
-          }
+        if (f.localPath == destPath) continue;
+        final srcFile = File(f.localPath!);
+        final srcExists = await srcFile.exists();
+        final destExists = await File(destPath).exists();
+
+        if (!srcExists && destExists) {
+          // Self-heal: the destination is already correct but the DB still
+          // points at the old staging path. This is the state left behind by
+          // the previous copy→delete→update ordering, which could be killed
+          // between the delete and the update, permanently stranding the book
+          // on a path that no longer exists.
+          await _repo.updateFileLocalPath(folderId, f.fileIndex, destPath);
+          continue;
         }
+        if (!srcExists) continue;
+
+        // Order matters: the DB is repointed BEFORE the staging copy is
+        // removed. Killing the process after the update leaves a stray
+        // duplicate in staging (harmless, and the scan ignores it); killing it
+        // after a delete-first ordering left the DB pointing at a missing file
+        // with no way back.
+        await srcFile.copy(destPath);
+        await _repo.updateFileLocalPath(folderId, f.fileIndex, destPath);
+        await srcFile.delete();
       }
       // Move cover from staging to finalDir if it landed there.
       final stagingCover = File('$staging/cover.jpg');

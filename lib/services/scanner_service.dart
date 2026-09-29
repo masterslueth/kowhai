@@ -60,6 +60,14 @@ class ScannerService {
       return [];
     }
 
+    // Callers build the exclusion set by string-concatenating onto a root they
+    // may have stored with a trailing separator, while Directory.list() echoes
+    // back whatever root string it was handed. Normalising both sides makes
+    // the comparison exact; without it a Drive book can evade exclusion and be
+    // discovered twice (once as local, once as Drive).
+    final normalizedExcludes = excludePaths.map(p.normalize).toSet();
+    bool isExcluded(String path) => normalizedExcludes.contains(p.normalize(path));
+
     // Unlike subfolder listings (which degrade to "skip this folder"), a root
     // listing failure is fatal to the scan — rethrow so callers surface a
     // friendly retryable error (see friendlyScanError) instead of silently
@@ -74,8 +82,7 @@ class ScannerService {
     final subdirs = entries
         .whereType<Directory>()
         .where((d) =>
-            !p.basename(d.path).startsWith('.') &&
-            !excludePaths.contains(d.path))
+            !p.basename(d.path).startsWith('.') && !isExcluded(d.path))
         .toList();
     final rootFiles = entries
         .whereType<File>()
@@ -88,7 +95,8 @@ class ScannerService {
 
     final books = <Audiobook>[];
     for (final subdir in subdirs) {
-      final results = await _scanAsBookOrAuthorFolder(subdir);
+      final results = await _scanAsBookOrAuthorFolder(subdir,
+          isExcluded: isExcluded);
       for (final book in results) {
         onBookFound?.call(book);
       }
@@ -112,7 +120,7 @@ class ScannerService {
   /// Default of `maxScanDepth - 1` accounts for [dir] itself already being
   /// one level below root.
   Future<List<Audiobook>> _scanAsBookOrAuthorFolder(Directory dir,
-      {int remainingDepth = maxScanDepth - 1}) async {
+      {int remainingDepth = maxScanDepth - 1, bool Function(String)? isExcluded}) async {
     final book = await _scanSubfolder(dir);
     if (book != null) return [book];
 
@@ -128,7 +136,9 @@ class ScannerService {
     }
     final subdirs = entries
         .whereType<Directory>()
-        .where((d) => !p.basename(d.path).startsWith('.'))
+        .where((d) =>
+            !p.basename(d.path).startsWith('.') &&
+            !(isExcluded?.call(d.path) ?? false))
         .toList();
     if (subdirs.isEmpty) return const [];
 
@@ -137,7 +147,7 @@ class ScannerService {
     final books = <Audiobook>[];
     for (final sub in subdirs) {
       final results = await _scanAsBookOrAuthorFolder(sub,
-          remainingDepth: remainingDepth - 1);
+          remainingDepth: remainingDepth - 1, isExcluded: isExcluded);
       books.addAll(results);
     }
     return books;
