@@ -20,7 +20,10 @@
 # Instantiated by name from the Android manifest and by platform-channel calls.
 -keep class com.ryanheise.audioservice.** { *; }
 -keep class * extends com.ryanheise.audioservice.AudioService { *; }
--keep class * extends androidx.media.session.MediaSession { *; }
+# NOTE: audio_service 0.18 does not use androidx.media3.session.MediaSession —
+# verified against the release DEX, which contains only the compat
+# android.support.v4.media.session.MediaSessionCompat. A keep rule for the
+# media3 class would have been a silent no-op, so it is not listed.
 
 # ── just_audio / ExoPlayer (Media3) ─────────────────────────────────────────
 # Player extensions and extractors are loaded reflectively.
