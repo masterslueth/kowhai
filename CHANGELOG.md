@@ -43,8 +43,10 @@ All notable changes to Kōwhai Audiobook Player are documented here.
 
 ### Security
 - **Local file server** - The Cast streaming server now refuses peers that are not on your local network, shuts itself down when idle (a session that ended without an explicit stop used to keep serving), compares its access token without an early exit, and caps concurrent connections.
-- **Release build is minified** - R8 and resource shrinking are enabled, so the shipped APK is no longer a readable copy of the app.
 - **App data excluded from backup** - Reading history, bookmarks with your notes, and stored Drive folder references are no longer eligible for cloud backup or device transfer.
+
+### Known / deferred
+- **Release build is not yet minified.** R8 and resource shrinking are prepared (keep rules written and statically verified against the release DEX) but left disabled, because a missing keep rule fails only at runtime on real hardware and no device install test was available. Tracked in the same way as the `path_provider_android` NDK pin.
 
 ### Changed
 - Foreign keys are now actually enforced, and the Drive book upsert was converted off `ConflictAlgorithm.replace` so enabling that pragma cannot cascade-delete downloaded-file rows.
