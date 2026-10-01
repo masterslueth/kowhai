@@ -76,7 +76,25 @@ android {
         release {
             // Use the = syntax to be absolutely direct
             signingConfig = signingConfigs.getByName("release")
-            
+
+            // DEFERRED - do not flip without a device install test.
+            //
+            // R8 strips the APK down so the shipped binary is not a readable
+            // copy of the app. Enabling it is worthwhile, but a missing keep
+            // rule surfaces only at RUNTIME and typically only in release -
+            // e.g. audio_service's notification, Media3 extractors, or Cast
+            // session setup failing after install. A green `flutter build apk`
+            // does NOT clear that, exactly as the path_provider_android NDK
+            // pin in pubspec.yaml documents.
+            //
+            // Static verification already done (see proguard-rules.pro): R8 was
+            // enabled, and the release DEX was dexdumped to confirm every
+            // AndroidManifest-referenced class - MainActivity, AudioService,
+            // AudioServiceActivity, MediaButtonReceiver, the Cast options
+            // provider and notification service, FlutterActivity - survived
+            // present and un-renamed. That proves the launch path but NOT
+            // runtime behaviour, so minification stays off until someone can
+            // install a release build on real hardware.
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

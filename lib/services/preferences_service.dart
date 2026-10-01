@@ -148,12 +148,30 @@ class PreferencesService {
   }
 
   /// Skip interval in seconds used by rewind and fast-forward. Default: 30.
+  ///
+  /// The stored value is read straight into `Duration(seconds: …)` and then
+  /// into clampedRewind/clampedForward, so it is range-checked on the way out
+  /// as well as on the way in: a persisted 0 makes both buttons silent no-ops
+  /// and a persisted negative makes the REWIND button fast-forward, because
+  /// `position - (-30s)` moves forward.
   Future<int> getSkipInterval() async {
-    return (await _sp).getInt(_skipIntervalKey) ?? 30;
+    final stored = (await _sp).getInt(_skipIntervalKey) ?? defaultSkipInterval;
+    return _clampSkipInterval(stored);
   }
 
+  /// Accepted range for the skip interval, in seconds.
+  static const int minSkipInterval = 5;
+  static const int maxSkipInterval = 300;
+  static const int defaultSkipInterval = 30;
+
+  static int _clampSkipInterval(int seconds) => seconds < minSkipInterval
+      ? minSkipInterval
+      : seconds > maxSkipInterval
+          ? maxSkipInterval
+          : seconds;
+
   Future<void> setSkipInterval(int seconds) async {
-    await (await _sp).setInt(_skipIntervalKey, seconds);
+    await (await _sp).setInt(_skipIntervalKey, _clampSkipInterval(seconds));
   }
 
   /// Library sort order. Stored as the enum name. Default: `lastPlayed`.

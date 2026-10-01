@@ -85,6 +85,31 @@ void main() {
         expect(await prefs.getSkipInterval(), secs);
       }
     });
+
+    test('skip interval is clamped to a usable range', () async {
+      // 0 made both skip buttons silent no-ops; a negative value made the
+      // REWIND button fast-forward, because `position - (-30s)` moves forward.
+      await prefs.setSkipInterval(0);
+      expect(await prefs.getSkipInterval(), PreferencesService.minSkipInterval);
+
+      await prefs.setSkipInterval(-30);
+      expect(await prefs.getSkipInterval(), PreferencesService.minSkipInterval);
+
+      await prefs.setSkipInterval(100000);
+      expect(await prefs.getSkipInterval(), PreferencesService.maxSkipInterval);
+    });
+
+    test('an out-of-range persisted value is clamped on read', () async {
+      SharedPreferences.setMockInitialValues({'skip_interval_seconds': -15});
+      final restored = PreferencesService();
+      expect(await restored.getSkipInterval(),
+          PreferencesService.minSkipInterval);
+
+      SharedPreferences.setMockInitialValues({'skip_interval_seconds': 0});
+      final zeroed = PreferencesService();
+      expect(await zeroed.getSkipInterval(),
+          PreferencesService.minSkipInterval);
+    });
   });
 
   group('PreferencesService — availability filter', () {

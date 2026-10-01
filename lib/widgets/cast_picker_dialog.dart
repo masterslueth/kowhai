@@ -23,9 +23,16 @@ Future<void> showCastPicker(BuildContext context) async {
 
   final vpn = await _vpnActive();
   await discovery.startDiscovery();
-  if (!context.mounted) return;
+  if (!context.mounted) {
+    // The guard alone is not enough: discovery is a PROCESS-LIFETIME
+    // singleton running mDNS, and the early return would leave it scanning
+    // the network for the rest of the process. Stop it on every exit path.
+    await discovery.stopDiscovery();
+    return;
+  }
 
-  await showDialog<void>(
+  try {
+    await showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('Cast to device'),
@@ -110,7 +117,8 @@ Future<void> showCastPicker(BuildContext context) async {
         ),
       ],
     ),
-  );
-
-  await discovery.stopDiscovery();
+    );
+  } finally {
+    await discovery.stopDiscovery();
+  }
 }

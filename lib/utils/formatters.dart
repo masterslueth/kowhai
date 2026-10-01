@@ -30,7 +30,12 @@ int calculateGlobalPosition({
     if (remaining < len || i == chapterDurations.length - 1) {
       // Clamp to the chapter length so overshoot (stale/changed durations,
       // truncated re-encodes) never seeks past the file's end on resume.
-      final posMs = len > 0 && remaining > len ? len : remaining;
+      // A zero-length chapter must collapse to 0: the `len > 0` guard
+      // previously skipped the clamp entirely and returned the full
+      // unconsumed `remaining`, i.e. a position past the end of the file it
+      // was attributed to. readMetadataChunk emits zero for every
+      // unreadable track, so this is not hypothetical.
+      final posMs = remaining > len ? len : remaining;
       return (chapterIndex: i, position: Duration(milliseconds: posMs));
     }
     remaining -= len;

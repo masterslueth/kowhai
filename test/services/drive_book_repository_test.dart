@@ -369,4 +369,101 @@ void main() {
       expect(tmpFile.existsSync(), isTrue);
     });
   });
+
+  group('DriveBookRepository upsert with foreign keys ON', () {
+    // Regression guard for the ON DELETE CASCADE landmine. Production now
+    // enables `PRAGMA foreign_keys = ON`. SQLite implements
+    // ConflictAlgorithm.replace as DELETE + INSERT, so a REPLACE on
+    // drive_books would cascade-delete every drive_book_files row for that
+    // book on each re-import.
+    test('re-upserting a book does not cascade-delete its file rows', () async {
+      final (:positionService, :repo) = await _makeRepo();
+      final db = await positionService.sharedDb;
+      await db.execute('PRAGMA foreign_keys = ON');
+
+      await repo.upsertDriveBook(_book('FK1'));
+      await repo.upsertFile(DriveFileRecord(
+        folderId: 'FK1',
+        fileIndex: 0,
+        fileId: 'fk1-0',
+        fileName: 'a.mp3',
+        mimeType: 'audio/mpeg',
+        sizeBytes: 10,
+        downloadState: DriveDownloadState.done,
+        localPath: '/tmp/a.mp3',
+      ));
+      expect((await repo.getFilesForBook('FK1')).length, 1);
+
+      // Simulate a Drive re-scan touching the same book.
+      await repo.upsertDriveBook(_book('FK1'));
+
+      final after = await repo.getFilesForBook('FK1');
+      expect(after.length, 1,
+          reason: 'REPLACE-as-DELETE would have cascaded this away');
+      expect(after.first.localPath, '/tmp/a.mp3',
+          reason: 'download state must survive a book re-import');
+    });
+
+    test('a re-import without a cover does not clear the stored cover',
+        () async {
+      final (:positionService, :repo) = await _makeRepo();
+
+      final withCover = DriveBookRecord(
+        folderId: 'FK2',
+        folderName: 'Book',
+        rootFolderId: 'root',
+        isShared: false,
+        accountEmail: 'a@b.c',
+        addedAt: 1,
+        coverFileId: 'cover-123',
+        audioFileIds: const [],
+      );
+      await repo.upsertDriveBook(withCover);
+
+      final withoutCover = DriveBookRecord(
+        folderId: 'FK2',
+        folderName: 'Book',
+        rootFolderId: 'root',
+        isShared: false,
+        accountEmail: 'a@b.c',
+        addedAt: 2,
+        coverFileId: null,
+        audioFileIds: const [],
+      );
+      await repo.upsertDriveBook(withoutCover);
+
+      expect((await repo.getDriveBook('FK2'))?.coverFileId, 'cover-123');
+    });
+
+    test('upsertDriveBookWithFiles writes the book and all files atomically',
+        () async {
+      final (:positionService, :repo) = await _makeRepo();
+
+      await repo.upsertDriveBookWithFiles(_book('FK3'), [
+        DriveFileRecord(
+          folderId: 'FK3',
+          fileIndex: 0,
+          fileId: 'fk3-0',
+          fileName: 'a.mp3',
+          mimeType: 'audio/mpeg',
+          sizeBytes: 1,
+          downloadState: DriveDownloadState.none,
+          localPath: null,
+        ),
+        DriveFileRecord(
+          folderId: 'FK3',
+          fileIndex: 1,
+          fileId: 'fk3-1',
+          fileName: 'b.mp3',
+          mimeType: 'audio/mpeg',
+          sizeBytes: 2,
+          downloadState: DriveDownloadState.none,
+          localPath: null,
+        ),
+      ]);
+
+      expect((await repo.getFilesForBook('FK3')).length, 2);
+      expect((await repo.getDriveBook('FK3'))?.audioFileIds.length, 2);
+    });
+  });
 }

@@ -99,13 +99,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final result = await FilePicker.getDirectoryPath(
         dialogTitle: 'Select your audiobooks folder',
       );
+      // A native folder picker can stay open for minutes, during which the
+      // user is free to navigate back and dispose this screen.
+      if (!mounted) return;
       if (result != null && result != _folderPath) {
         await locator<PreferencesService>().setLibraryPath(result);
+        if (!mounted) return;
         setState(() => _folderPath = result);
         widget.onFolderChanged?.call();
       }
     } finally {
-      setState(() => _pickingFolder = false);
+      // `finally` runs on every exit path, so the guard is required here too.
+      if (mounted) setState(() => _pickingFolder = false);
     }
   }
 
@@ -130,6 +135,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _setMetadataEnrichment(bool value) async {
     await locator<PreferencesService>().setMetadataEnrichment(value);
     if (!value) locator<EnrichmentService>().cancel();
+    if (!mounted) return;
     setState(() => _metadataEnrichment = value);
   }
 
@@ -137,6 +143,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final handler = AudioHandlerScope.of(context).audioHandler;
     await locator<PreferencesService>().setAutoRewind(value);
     handler.updateAutoRewind(value);
+    if (!mounted) return;
     setState(() => _autoRewind = value);
   }
 
@@ -144,6 +151,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final handler = AudioHandlerScope.of(context).audioHandler;
     await locator<PreferencesService>().setSkipInterval(seconds);
     handler.updateSkipInterval(seconds);
+    if (!mounted) return;
     setState(() => _skipInterval = seconds);
   }
 
@@ -168,6 +176,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } else {
       TelemetryService.disableCrashHandler();
     }
+    if (!mounted) return;
     setState(() => _telemetryEnabled = value);
   }
 
@@ -208,18 +217,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       folder.name,
       isShared: folder.isShared,
     );
+    if (!mounted) return;
     setState(() => _driveFolderName = folder.name);
+    if (!mounted) return;
     await _rescanDrive();
   }
 
   Future<void> _setRemoveWhenFinished(bool value) async {
     await locator<PreferencesService>().setRemoveWhenFinished(value);
+    if (!mounted) return;
     setState(() => _removeWhenFinished = value);
   }
 
   Future<void> _setDriveProgressSync(bool value) async {
     if (!value) {
       await locator<PreferencesService>().setDriveProgressSync(false);
+      if (!mounted) return;
       setState(() => _driveProgressSync = false);
       return;
     }
@@ -247,6 +260,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final existing = await prefs.getDriveBackupFolder();
     if (existing != null && !needFolderPick) {
       await prefs.setDriveProgressSync(true);
+      if (!mounted) return;
       setState(() => _driveProgressSync = true);
       return;
     }
@@ -254,7 +268,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Pick a writable folder.
     if (!mounted) return;
     final folder = await showDriveFolderPicker(context, driveService);
-    if (folder == null) {
+    if (folder == null || !mounted) {
       // User cancelled — leave toggle off.
       return;
     }
@@ -295,6 +309,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _setRefreshOnStartup(bool value) async {
     await locator<PreferencesService>().setRefreshOnStartup(value);
+    if (!mounted) return;
     setState(() => _refreshOnStartup = value);
   }
 

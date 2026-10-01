@@ -90,8 +90,10 @@ class DriveDownloadManager {
   int _activeCount = 0;
   static const _maxConcurrent = 2;
 
-  /// Re-enqueues any book that has files in [DriveDownloadState.error] and is
-  /// not yet fully downloaded. Called on app resume to recover downloads that
+  /// Re-enqueues any book that is not fully downloaded and shows evidence of
+  /// an interrupted transfer — either a file in [DriveDownloadState.error] or
+  /// one still flagged 'downloading' from a process that was killed without
+  /// running its error handler. Called on app resume to recover downloads that
   /// were interrupted by background network suspension (iOS) or Android Doze.
   Future<void> resumeInterruptedDownloads() async {
     final books = await _repo.getAllDriveBooks();
@@ -99,8 +101,20 @@ class DriveDownloadManager {
       final files = await _repo.getFilesForBook(book.folderId);
       if (files.isEmpty) continue;
       final allDone = files.every((f) => f.downloadState == DriveDownloadState.done);
+      if (allDone) continue;
+      // A file left in 'downloading' has no live future to complete it if the
+      // owning process is gone, and nothing re-seeds it (resetStaleDownloads
+      // runs only at startup). Resetting to 'none' lets enqueueAllFiles pick
+      // it up instead of leaving the book permanently mid-transfer.
+      final stranded = files
+          .where((f) => f.downloadState == DriveDownloadState.downloading)
+          .toList();
+      for (final f in stranded) {
+        await _repo.updateFileState(
+            book.folderId, f.fileIndex, DriveDownloadState.none);
+      }
       final hasError = files.any((f) => f.downloadState == DriveDownloadState.error);
-      if (!allDone && hasError) {
+      if (hasError || stranded.isNotEmpty) {
         await enqueueAllFiles(book.folderId);
       }
     }
@@ -365,9 +379,9 @@ class DriveDownloadManager {
 
   Future<String> _defaultDestPath(String folderId, String fileName) async {
     final dir = await getApplicationDocumentsDirectory();
-    // fileName comes from Drive metadata (user-controlled) — sanitise before
-    // it becomes a path segment.
-    return '${dir.path}/drive_books/$folderId/${safeFsName(fileName)}';
+    // Both segments are sanitised: fileName comes from Drive metadata
+    // (user-controlled) and folderId is a raw path segment from the DB.
+    return '${dir.path}/drive_books/${safeFsName(folderId)}/${safeFsName(fileName)}';
   }
 
   void dispose() {

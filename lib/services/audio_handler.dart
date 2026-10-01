@@ -4,8 +4,10 @@ import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_chrome_cast/flutter_chrome_cast.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../models/audiobook.dart';
+import '../utils/safe_fs_name.dart';
 import 'cast_controller.dart';
 import 'drive_library_service.dart';
 import 'drive_removal_scheduler.dart';
@@ -23,6 +25,8 @@ class KowhaiHandler extends BaseAudioHandler {
   late final DriveRemovalScheduler _driveRemoval;
   late final msb.MediaStateBroadcaster _broadcaster;
   DateTime? _lastPausedAt;
+  int? _lastMediaItemChapter;
+  Duration? _lastMediaItemDuration;
   bool _autoRewind = true;
 
   /// True while a book is being loaded. The persister's [pp.PositionPersister.readPosition]
@@ -125,10 +129,16 @@ class KowhaiHandler extends BaseAudioHandler {
       },
     );
 
+    // NOTE: just_audio's playingStream emits its CURRENT value on subscribe,
+    // so this listener fires once with `false` during construction. Using
+    // `??=` there seeded _lastPausedAt with the app-start time, and nothing
+    // cleared it until a real play. The first play() after that measured
+    // "paused" against app start, so browsing the library for 30 minutes and
+    // then hitting play rewound the book by the full browse time without the
+    // user ever having paused it. The seed is therefore skipped, and the value
+    // is only set by the explicit pause() below.
     _player.playingStream.listen((playing) {
-      if (!playing) {
-        _lastPausedAt ??= DateTime.now();
-      } else {
+      if (playing) {
         _lastPausedAt = null;
       }
     });
@@ -238,9 +248,15 @@ class KowhaiHandler extends BaseAudioHandler {
       } else if (book.coverImageBytes != null) {
         try {
           final tmp = await getTemporaryDirectory();
-          final f =
-              File('${tmp.path}/kowhai_cover_${book.path.hashCode.abs()}.jpg');
-          if (!await f.exists()) await f.writeAsBytes(book.coverImageBytes!);
+          // Refreshed on every load: the previous `if (!exists)` guard meant a
+          // book whose embedded art changed kept serving the stale JPEG for
+          // the life of the install. The name combines the sanitised basename
+          // with a hash so two books with the same title in different folders
+          // cannot collide on `hashCode` alone.
+          final stem = p.basenameWithoutExtension(book.path);
+          final f = File(
+              '${tmp.path}/kowhai_cover_${safeFsName(stem)}_${book.path.hashCode.toUnsigned(32)}.jpg');
+          await f.writeAsBytes(book.coverImageBytes!, flush: true);
           artUri = f.uri;
         } catch (_) {}
       }
@@ -471,7 +487,7 @@ class KowhaiHandler extends BaseAudioHandler {
       speed: _player.speed,
       queueIndex: _player.currentIndex,
     );
-    if (_player.duration != null) _publishMediaItem();
+    _publishMediaItemIfChanged();
   }
 
   // ── Error reporting ────────────────────────────────────────────────────────
@@ -526,11 +542,33 @@ class KowhaiHandler extends BaseAudioHandler {
   void _publishMediaItem() {
     final book = _book;
     if (book == null) return;
+    _lastMediaItemChapter = _player.currentIndex ?? 0;
+    _lastMediaItemDuration = _player.duration;
     _broadcaster.updateMediaItem(
       book: book,
       chapterIndex: _player.currentIndex ?? 0,
       duration: _player.duration,
       artUri: _artUri,
     );
+  }
+
+  /// Republishes the MediaItem only when something it actually displays has
+  /// changed.
+  ///
+  /// `_broadcastState` is the handler for `playbackEventStream`, which fires
+  /// on every position update (several times a second). Unconditionally
+  /// calling `mediaItem.add(...)` there allocated a fresh MediaItem and
+  /// serialised it across the platform channel to the Android media session
+  /// that many times, even though the item only varies by chapter, duration
+  /// and artwork.
+  void _publishMediaItemIfChanged() {
+    if (_book == null) return;
+    final chapter = _player.currentIndex ?? 0;
+    final duration = _player.duration;
+    if (chapter == _lastMediaItemChapter &&
+        duration == _lastMediaItemDuration) {
+      return;
+    }
+    _publishMediaItem();
   }
 }

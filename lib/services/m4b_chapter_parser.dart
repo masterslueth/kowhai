@@ -13,6 +13,18 @@ import '../models/audiobook.dart';
 class M4bChapterParser {
   static void _log(String msg) => debugPrint('[Kowhai:M4bParser] $msg');
 
+  /// Ceiling on a single box payload slurped into memory. A truncated or
+  /// crafted MP4 can declare a box size of 0x7FFFFFFF; without this cap
+  /// `_readBox` would allocate gigabytes from a 20-byte file.
+  static const int _maxBoxBytes = 16 * 1024 * 1024;
+
+  /// Ceiling on the number of sample-table entries expanded in memory. The
+  /// `stts` run count and `stsz` sample count are raw uint32 values from the
+  /// file, so a corrupt value near 2^32 would otherwise OOM the isolate.
+  /// Every sample needs at least one byte of media data, so this is far above
+  /// any legitimate audiobook while bounding the blast radius.
+  static const int _maxSamples = 8 * 1000 * 1000;
+
   /// Entry point: tries Nero `chpl` first, then QuickTime chapter track.
   static Future<List<Chapter>> parseChapters(String filePath) async {
     RandomAccessFile? raf;
@@ -84,9 +96,16 @@ class M4bChapterParser {
     return null;
   }
 
-  /// Reads the data portion of [box] into memory.
+  /// Reads the data portion of [box] into memory, clamped to [_maxBoxBytes].
+  ///
+  /// [box]'s end offset comes from the box's own size field, which a corrupt
+  /// file can inflate arbitrarily. The read is capped so a hostile or truncated
+  /// M4B degrades into "no chapters" (the caller is try/caught) instead of an
+  /// out-of-memory crash.
   static Future<Uint8List> _readBox(RandomAccessFile raf, (String, int, int) box) async {
-    final len = box.$3 - box.$2;
+    final declared = box.$3 - box.$2;
+    if (declared <= 0) return Uint8List(0);
+    final len = declared > _maxBoxBytes ? _maxBoxBytes : declared;
     await raf.setPosition(box.$2);
     return Uint8List.fromList(await raf.read(len));
   }
@@ -225,7 +244,11 @@ class M4bChapterParser {
     for (int i = 0; i < sttsCount && off + 8 <= sttsData.length; i++) {
       final n = sttsBD.getUint32(off, Endian.big);     // sample count in run
       final d = sttsBD.getUint32(off + 4, Endian.big); // duration per sample
-      for (int j = 0; j < n; j++) {
+      // `n` is an unvalidated uint32 from the file: bound the expansion so a
+      // corrupt run length cannot allocate gigabytes of List<int>.
+      final remaining = _maxSamples - sampleStarts.length;
+      if (remaining <= 0) break;
+      for (int j = 0; j < n && j < remaining; j++) {
         sampleStarts.add(ticks);
         ticks += d;
       }
@@ -235,7 +258,10 @@ class M4bChapterParser {
     // Sample sizes from stsz
     final stszBD = ByteData.sublistView(stszData);
     final defSz = stszBD.getUint32(4, Endian.big);
-    final sampleCount = stszBD.getUint32(8, Endian.big);
+    final declaredSampleCount = stszBD.getUint32(8, Endian.big);
+    // Unvalidated uint32: `List.filled(0xFFFFFFFF, …)` is an instant OOM.
+    final sampleCount =
+        declaredSampleCount > _maxSamples ? _maxSamples : declaredSampleCount;
     final sizes = <int>[];
     if (defSz == 0) {
       off = 12;

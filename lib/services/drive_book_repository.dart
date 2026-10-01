@@ -114,34 +114,93 @@ class DriveBookRepository {
 
   Future<Database> get _db => _positionService.sharedDb;
 
+  /// Inserts [record] and all of [files] in a single transaction.
+  ///
+  /// Previously these were N+1 independent writes, so a cancellation or a
+  /// thrown cast midway left a `drive_books` row with a partial file set.
+  /// Because rescanDrive skips folders that already have a record, such a row
+  /// was never repaired: totalFileCount stayed wrong and the book sat
+  /// permanently "half downloaded".
+  Future<void> upsertDriveBookWithFiles(
+      DriveBookRecord record, List<DriveFileRecord> files) async {
+    final db = await _db;
+    await db.transaction((txn) async {
+      await _upsertBook(txn, record);
+      for (final f in files) {
+        await _upsertFile(txn, f);
+      }
+    });
+  }
+
   Future<void> upsertDriveBook(DriveBookRecord record) async {
     final db = await _db;
-    await db.insert('drive_books', record.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace);
+    await _upsertBook(db, record);
+  }
+
+  Future<void> _upsertBook(DatabaseExecutor db, DriveBookRecord record) async {
+    // Deliberately an UPSERT, not ConflictAlgorithm.replace. SQLite implements
+    // REPLACE as DELETE + INSERT, and drive_book_files has ON DELETE CASCADE
+    // on folder_id - so a REPLACE here would wipe every downloaded-file row
+    // for the book on each re-import (now that foreign_keys is enabled).
+    // cover_file_id is preserved with COALESCE so a re-scan that did not
+    // resolve a cover does not clear one already on record.
+    await db.rawInsert(
+      'INSERT INTO drive_books '
+      '(folder_id, folder_name, root_folder_id, is_shared, account_email, added_at, cover_file_id) '
+      'VALUES (?, ?, ?, ?, ?, ?, ?) '
+      'ON CONFLICT(folder_id) DO UPDATE SET '
+      'folder_name=excluded.folder_name, '
+      'root_folder_id=excluded.root_folder_id, '
+      'is_shared=excluded.is_shared, '
+      'account_email=excluded.account_email, '
+      'added_at=excluded.added_at, '
+      'cover_file_id=COALESCE(excluded.cover_file_id, drive_books.cover_file_id)',
+      [
+        record.folderId,
+        record.folderName,
+        record.rootFolderId,
+        record.isShared ? 1 : 0,
+        record.accountEmail,
+        record.addedAt,
+        record.coverFileId,
+      ],
+    );
   }
 
   Future<void> upsertFile(DriveFileRecord record) async {
     final db = await _db;
+    await _upsertFile(db, record);
+  }
+
+  /// Safe to use REPLACE here: drive_book_files has no child tables, so
+  /// DELETE + INSERT cannot cascade anywhere.
+  Future<void> _upsertFile(DatabaseExecutor db, DriveFileRecord record) async {
     await db.insert('drive_book_files', record.toMap(),
         conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<List<DriveBookRecord>> getAllDriveBooks() async {
     final db = await _db;
+    // One query for all books plus one for all files, instead of a round-trip
+    // per book. getAllDriveBooks runs several times per library refresh
+    // (loadDriveBooks, driveBookDirs, removeUndownloadedBooks, reseedAll), so
+    // the old shape cost O(books) sequential queries each time.
     final bookRows = await db.query('drive_books');
-    final result = <DriveBookRecord>[];
-    for (final row in bookRows) {
-      final folderId = row['folder_id'] as String;
-      final fileRows = await db.query(
-        'drive_book_files',
-        where: 'folder_id = ?',
-        whereArgs: [folderId],
-        orderBy: 'file_index ASC',
-      );
-      final fileIds = fileRows.map((r) => r['file_id'] as String).toList();
-      result.add(DriveBookRecord.fromMap(row, fileIds));
+    if (bookRows.isEmpty) return [];
+
+    final allFiles = await db.query('drive_book_files',
+        orderBy: 'folder_id ASC, file_index ASC');
+    final fileIdsByFolder = <String, List<String>>{};
+    for (final row in allFiles) {
+      (fileIdsByFolder[row['folder_id'] as String] ??= [])
+          .add(row['file_id'] as String);
     }
-    return result;
+
+    return [
+      for (final row in bookRows)
+        DriveBookRecord.fromMap(
+            row, fileIdsByFolder[row['folder_id'] as String] ?? const []),
+    ];
   }
 
   Future<DriveBookRecord?> getDriveBook(String folderId) async {
@@ -175,12 +234,35 @@ class DriveBookRepository {
     );
   }
 
+  /// Resets every file for a book to 'none' and clears its cached local_path.
+  ///
+  /// [resetBookDownloads] deliberately KEEPS local_path so a re-download lands
+  /// in the same place. That is wrong after the files have actually been
+  /// deleted from disk: the stale path would make the library advertise audio
+  /// that no longer exists, and it is never revisited (resetStaleDownloads
+  /// only rescues 'downloading' rows).
+  Future<void> reseedFolderStates(String folderId) async {
+    final db = await _db;
+    await db.update(
+      'drive_book_files',
+      {'download_state': 'none', 'local_path': null},
+      where: 'folder_id = ?',
+      whereArgs: [folderId],
+    );
+  }
+
   Future<void> deleteDriveBook(String folderId) async {
     final db = await _db;
-    // Foreign key cascade handles drive_book_files deletion if FK pragmas are on,
-    // but SQLite FK is off by default in sqflite — delete explicitly.
-    await db.delete('drive_book_files', where: 'folder_id = ?', whereArgs: [folderId]);
-    await db.delete('drive_books', where: 'folder_id = ?', whereArgs: [folderId]);
+    // Foreign keys are enabled in PositionService.onConfigure, so the CASCADE
+    // would handle the child rows. Both deletes are kept explicit and wrapped
+    // in a transaction so the book never half-disappears, and so behaviour
+    // does not silently depend on the pragma.
+    await db.transaction((txn) async {
+      await txn.delete('drive_book_files',
+          where: 'folder_id = ?', whereArgs: [folderId]);
+      await txn.delete('drive_books',
+          where: 'folder_id = ?', whereArgs: [folderId]);
+    });
   }
 
   Future<List<DriveFileRecord>> getFilesForBook(String folderId) async {

@@ -35,7 +35,11 @@ class DriveLibraryService {
   @visibleForTesting
   Future<String> stagingDir(String folderId) async {
     final docs = await getApplicationDocumentsDirectory();
-    return '${docs.path}/drive_books/$folderId';
+    // Sanitised for the same reason as folderName in bookDir: this is a raw
+    // path segment taken from a DB column, and drive_download_manager builds
+    // download destinations from it too. Drive ids are server-generated, so
+    // this is defence in depth rather than an active exposure.
+    return '${docs.path}/drive_books/${safeFsName(folderId)}';
   }
 
   /// Returns the final local directory for a Drive book.
@@ -48,6 +52,9 @@ class DriveLibraryService {
       if (localPath != null && localPath.isNotEmpty) {
         // Drive folder names are user-controlled — sanitise so a hostile name
         // (e.g. containing `/` or `..`) cannot escape the library root.
+        // Separator style is kept as-is: ScannerService normalises both sides
+        // of the exclusion comparison, so a forward-slash join still matches
+        // the backslash paths Directory.list() reports on Windows.
         return '$localPath/${safeFsName(folderName)}';
       }
     }
@@ -156,22 +163,13 @@ class DriveLibraryService {
           .where((f) => !f.name.startsWith('.'))
           .toList();
 
-      // Save book record
-      await _repo.upsertDriveBook(DriveBookRecord(
-        folderId: scan.folder.id,
-        folderName: scan.folder.name,
-        rootFolderId: rootFolder.id,
-        isShared: scan.folder.isShared,
-        accountEmail: account.email,
-        addedAt: DateTime.now().millisecondsSinceEpoch,
-        coverFileId: scan.coverFile?.id,
-        audioFileIds: audioFiles.map((f) => f.id).toList(),
-      ));
-
-      // Save file records
+      // Book record and all of its file records land in one transaction, so a
+      // cancellation part-way cannot leave a tracked book with a partial file
+      // set that rescanDrive would then skip forever.
+      final fileRecords = <DriveFileRecord>[];
       for (int i = 0; i < audioFiles.length; i++) {
         final f = audioFiles[i];
-        await _repo.upsertFile(DriveFileRecord(
+        fileRecords.add(DriveFileRecord(
           folderId: scan.folder.id,
           fileIndex: i,
           fileId: f.id,
@@ -182,6 +180,19 @@ class DriveLibraryService {
           localPath: '$dir/${safeFsName(f.name)}',
         ));
       }
+      await _repo.upsertDriveBookWithFiles(
+        DriveBookRecord(
+          folderId: scan.folder.id,
+          folderName: scan.folder.name,
+          rootFolderId: rootFolder.id,
+          isShared: scan.folder.isShared,
+          accountEmail: account.email,
+          addedAt: DateTime.now().millisecondsSinceEpoch,
+          coverFileId: scan.coverFile?.id,
+          audioFileIds: audioFiles.map((f) => f.id).toList(),
+        ),
+        fileRecords,
+      );
     }
 
     return await loadDriveBooks();
@@ -196,6 +207,9 @@ class DriveLibraryService {
       final hasDownloaded = files.any((f) => f.downloadState == DriveDownloadState.done);
       if (!hasDownloaded) {
         await _repo.deleteDriveBook(record.folderId);
+        // Release the tracker's per-book notifier too; nothing can be
+        // listening any more because the book is leaving the library.
+        _tracker.forget(record.folderId);
       }
     }
   }
@@ -227,14 +241,30 @@ class DriveLibraryService {
       for (final f in files) {
         if (f.downloadState != DriveDownloadState.done || f.localPath == null) continue;
         final destPath = '$finalDir/${safeFsName(f.fileName)}';
-        if (f.localPath != destPath) {
-          final srcFile = File(f.localPath!);
-          if (await srcFile.exists()) {
-            await srcFile.copy(destPath);
-            await srcFile.delete();
-            await _repo.updateFileLocalPath(folderId, f.fileIndex, destPath);
-          }
+        if (f.localPath == destPath) continue;
+        final srcFile = File(f.localPath!);
+        final srcExists = await srcFile.exists();
+        final destExists = await File(destPath).exists();
+
+        if (!srcExists && destExists) {
+          // Self-heal: the destination is already correct but the DB still
+          // points at the old staging path. This is the state left behind by
+          // the previous copy→delete→update ordering, which could be killed
+          // between the delete and the update, permanently stranding the book
+          // on a path that no longer exists.
+          await _repo.updateFileLocalPath(folderId, f.fileIndex, destPath);
+          continue;
         }
+        if (!srcExists) continue;
+
+        // Order matters: the DB is repointed BEFORE the staging copy is
+        // removed. Killing the process after the update leaves a stray
+        // duplicate in staging (harmless, and the scan ignores it); killing it
+        // after a delete-first ordering left the DB pointing at a missing file
+        // with no way back.
+        await srcFile.copy(destPath);
+        await _repo.updateFileLocalPath(folderId, f.fileIndex, destPath);
+        await srcFile.delete();
       }
       // Move cover from staging to finalDir if it landed there.
       final stagingCover = File('$staging/cover.jpg');
@@ -298,12 +328,7 @@ class DriveLibraryService {
   /// download state to none. Cover art is preserved. The book record is kept.
   Future<void> undownloadBook(String folderId) async {
     final files = await _repo.getFilesForBook(folderId);
-    for (final f in files) {
-      if (f.localPath != null) {
-        final file = File(f.localPath!);
-        if (await file.exists()) await file.delete();
-      }
-    }
+    await _deleteLocalFilesQuietly(files);
     await _repo.resetBookDownloads(folderId);
     await _tracker.reseed(folderId);
   }
@@ -319,13 +344,29 @@ class DriveLibraryService {
   /// metadata are preserved so the book remains in the library as finished.
   Future<void> deleteLocalFiles(String folderId) async {
     final files = await _repo.getFilesForBook(folderId);
-    for (final f in files) {
-      if (f.localPath != null) {
-        final file = File(f.localPath!);
-        if (await file.exists()) await file.delete();
-      }
-      await _repo.updateFileState(folderId, f.fileIndex, DriveDownloadState.none);
-    }
+    await _deleteLocalFilesQuietly(files);
+    await _repo.reseedFolderStates(folderId);
     await _tracker.reseed(folderId);
+  }
+
+  /// Deletes each file, isolating per-file failures.
+  ///
+  /// A single `delete()` throwing (file locked, read-only volume) previously
+  /// aborted the loop, leaving the already-deleted files still marked 'done'
+  /// in the DB. `resetStaleDownloads` only rescues 'downloading' rows, so those
+  /// files were never revisited and the library kept advertising audio files
+  /// that no longer existed.
+  Future<void> _deleteLocalFilesQuietly(List<DriveFileRecord> files) async {
+    for (final f in files) {
+      final path = f.localPath;
+      if (path != null) {
+        try {
+          final file = File(path);
+          if (await file.exists()) await file.delete();
+        } catch (e) {
+          debugPrint('[Kowhai:Drive] could not delete $path: $e');
+        }
+      }
+    }
   }
 }

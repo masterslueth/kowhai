@@ -71,9 +71,19 @@ Future<void> showChapterListSheet({
                         scrollCtrl: scrollCtrl,
                         count: chapCount,
                         currentIndex: currentChapterIndex,
-                        title: (i) => book.chapterNames.isNotEmpty
-                            ? book.chapterNames[i]
-                            : p.basenameWithoutExtension(book.audioFiles[i]),
+                        title: (i) {
+                          // chapCount is derived from audioFiles.length while
+                          // the name list is chapterNames, so the two can
+                          // disagree; bounds-check before indexing rather than
+                          // trusting the invariant to hold.
+                          if (i < book.chapterNames.length) {
+                            return book.chapterNames[i];
+                          }
+                          if (i < book.audioFiles.length) {
+                            return p.basenameWithoutExtension(book.audioFiles[i]);
+                          }
+                          return 'Chapter ${i + 1}';
+                        },
                         duration: (i) => i < book.chapterDurations.length
                             ? book.chapterDurations[i]
                             : null,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kowhai/models/audiobook.dart';
@@ -146,6 +148,68 @@ void main() {
       s.cancel();
       s.cancel();
       expect(s.isPending, isFalse);
+    });
+
+    test('cancel during the preference lookup still wins', () {
+      // Regression: cancel() used to run BEFORE the
+      // isRemoveWhenFinishedEnabled() await, so a cancel landing during that
+      // suspension cancelled a still-null timer and the resumed continuation
+      // installed a fresh one — deleting files while the user was listening.
+      fakeAsync((async) {
+        final deleted = <String>[];
+        final completer = Completer<bool>();
+        final s = DriveRemovalScheduler(
+          getBookStatus: (_) async => BookStatus.finished,
+          deleteFiles: (f) async => deleted.add(f),
+          isRemoveWhenFinishedEnabled: () => completer.future,
+          delay: const Duration(minutes: 1),
+        );
+
+        unawaited(s.scheduleForBook(_driveBook()));
+        async.flushMicrotasks();
+        expect(s.isPending, isFalse, reason: 'timer not installed yet');
+
+        // The user presses play: cancel lands while the lookup is in flight.
+        s.cancel();
+        expect(s.isPending, isFalse);
+
+        // Now the preference lookup resolves and the continuation resumes.
+        completer.complete(true);
+        async.flushMicrotasks();
+
+        expect(s.isPending, isFalse,
+            reason: 'a superseded schedule must not install a timer');
+        async.elapse(const Duration(minutes: 5));
+        expect(deleted, isEmpty,
+            reason: 'files must not be deleted after the user pressed play');
+      });
+    });
+
+    test('a delete failure does not escape the timer callback', () {
+      // Regression: the callback used `try/finally` with no `catch`, so a
+      // throw from getBookStatus/deleteFiles became an unhandled async error
+      // while the `finally` still cleared the timer — making a failed
+      // cleanup look like a successful one.
+      fakeAsync((async) {
+        var deleteAttempts = 0;
+        final s = DriveRemovalScheduler(
+          getBookStatus: (_) async => throw StateError('db gone'),
+          deleteFiles: (_) async => deleteAttempts++,
+          isRemoveWhenFinishedEnabled: () async => true,
+          delay: const Duration(minutes: 1),
+        );
+        s.scheduleForBook(_driveBook());
+        async.flushMicrotasks();
+        expect(s.isPending, isTrue);
+
+        // An unhandled error here fails the test; completing cleanly is the
+        // assertion.
+        async.elapse(const Duration(minutes: 1));
+        async.flushMicrotasks();
+
+        expect(s.isPending, isFalse, reason: 'timer must still be cleared');
+        expect(deleteAttempts, 0);
+      });
     });
   });
 }

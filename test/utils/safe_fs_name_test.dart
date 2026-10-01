@@ -52,6 +52,27 @@ void main() {
       expect(result.endsWith('.mp3'), isTrue);
     });
 
+    test('caps length when the extension itself is longer than the budget', () {
+      // Regression: a naive `maxLength - ext.length` goes negative here and
+      // threw RangeError, so a hostile Drive filename crashed the app.
+      final hostile = 'chapter.${'a' * 200}';
+      final result = safeFsName(hostile);
+      expect(result.length, lessThanOrEqualTo(100));
+      expect(result, isNot(contains('..')));
+    });
+
+    test('does not end a truncated name with a dot', () {
+      // A slice landing on '.' produces a hidden/illegal filesystem name.
+      expect(safeFsName('a.b', maxLength: 2), 'a');
+      final dotted = 'a.${'b' * 200}';
+      expect(safeFsName(dotted).endsWith('.'), isFalse);
+    });
+
+    test('truncation never yields an empty name', () {
+      expect(safeFsName('a.${'b' * 200}'), isNotEmpty);
+      expect(safeFsName('a' * 500), isNotEmpty);
+    });
+
     test('handles unicode names without mangling', () {
       const name = 'Kāi Tahu — Te Reo (audiobook)';
       expect(safeFsName(name), name);

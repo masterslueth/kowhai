@@ -72,11 +72,15 @@ class MediaStateBroadcaster {
     setPlaybackState(getPlaybackState().copyWith(
       controls: _buildControls(playing),
       systemActions: const {MediaAction.seek},
-      androidCompactActionIndices: const [1, 2, 3],
+      androidCompactActionIndices: const [1, 3],
       processingState: processingState,
       playing: playing,
       updatePosition: position,
       speed: speed,
+      // Explicitly cleared: copyWith retains the previous value, so the
+      // notification kept advertising the last LOCAL track index after
+      // playback handed off to a receiver that reports no queue index.
+      queueIndex: null,
     ));
   }
 
@@ -158,11 +162,18 @@ Duration previousChapterTarget({
 }
 
 /// Clamped fast-forward position for a non-chaptered source.
+///
+/// A `null` [totalDuration] means "duration not known yet" (just_audio reports
+/// null while idle or loading), NOT "the book is zero seconds long". Treating
+/// the unknown case as zero made `target > max` true for any positive step and
+/// returned `Duration.zero`, so a fast-forward issued before the duration
+/// resolved seeked the book back to 0:00. With no upper bound to respect, the
+/// target is returned unclamped.
 Duration clampedForward(Duration current, Duration? totalDuration,
     Duration step) {
   final target = current + step;
-  final max = totalDuration ?? Duration.zero;
-  return target > max ? max : target;
+  if (totalDuration == null) return target;
+  return target > totalDuration ? totalDuration : target;
 }
 
 /// Clamped rewind position for a non-chaptered source.

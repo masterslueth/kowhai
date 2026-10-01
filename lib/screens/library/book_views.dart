@@ -29,6 +29,9 @@ Widget buildLibraryGrid({
     onRefresh: onRefresh,
     child: GridView.builder(
       padding: const EdgeInsets.all(padding),
+      // Without this, pull-to-refresh is inert whenever the content is
+      // shorter than the viewport — common for a small library.
+      physics: const AlwaysScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 220,
         mainAxisSpacing: spacing,
@@ -37,6 +40,11 @@ Widget buildLibraryGrid({
       ),
       itemCount: books.length,
       itemBuilder: (context, i) => AudiobookCard(
+        // Keyed by path: the collection re-sorts when the user changes sort
+        // order, and without a key the elements are matched by index, so a
+        // StatefulWidget holding a decoded image frame (BookCover) is handed a
+        // different book and briefly paints the previous cover.
+        key: ValueKey(books[i].path),
         book: books[i],
         isActive: books[i].path == activePath && isPlaying,
         status: statuses[books[i].path] ?? BookStatus.notStarted,
@@ -64,6 +72,7 @@ Widget buildLibraryList({
     onRefresh: onRefresh,
     child: ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 8),
+      physics: const AlwaysScrollableScrollPhysics(),
       itemCount: books.length,
       separatorBuilder: (_, __) => const Divider(height: 1, indent: 88),
       itemBuilder: (context, i) {
@@ -72,6 +81,7 @@ Widget buildLibraryList({
         final downloading =
             folderId != null && downloadingFolderIds.contains(folderId);
         return AudiobookListTile(
+          key: ValueKey(book.path),
           book: book,
           isActive: book.path == activePath && isPlaying,
           status: statuses[book.path] ?? BookStatus.notStarted,

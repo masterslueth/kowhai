@@ -37,7 +37,19 @@ class PositionService {
     final dir = await getApplicationDocumentsDirectory();
     return openDatabase(
       '${dir.path}/kowhai_positions.db',
-      version: 4,
+      version: 5,
+      onConfigure: (db) async {
+        // SQLite ships with foreign keys OFF per connection. The
+        // drive_book_files DTD declares ON DELETE CASCADE, and
+        // upsertDriveBook uses ConflictAlgorithm.replace (which SQLite
+        // implements as DELETE + INSERT) - so leaving the pragma off is what
+        // currently stops every Drive re-import from cascade-deleting that
+        // book's file rows. Enabling it is correct, but only safe because
+        // ConflictAlgorithm.replace is not used for those tables; a future
+        // REPLACE there would now silently wipe file rows. Kept explicit and
+        // documented rather than relying on the default.
+        await db.execute('PRAGMA foreign_keys = ON');
+      },
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE positions (
@@ -50,6 +62,10 @@ class PositionService {
             status TEXT
           )
         ''');
+        // getLastPlayedBookPath / getAllPositions both ORDER BY updated_at DESC
+        // over the whole table, which is a full scan plus sort on every call.
+        await db.execute(
+            'CREATE INDEX idx_positions_updated_at ON positions(updated_at DESC)');
         await createDriveTables(db);
         await createBookmarksTable(db);
       },
@@ -72,12 +88,16 @@ class PositionService {
     if (oldVersion < 4) {
       await createBookmarksTable(db);
     }
+    if (oldVersion < 5) {
+      await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_positions_updated_at ON positions(updated_at DESC)');
+    }
   }
 
   @visibleForTesting
   static Future<void> createBookmarksTable(Database db) async {
     await db.execute('''
-      CREATE TABLE bookmarks (
+      CREATE TABLE IF NOT EXISTS bookmarks (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         book_path    TEXT NOT NULL,
         chapter_index INTEGER NOT NULL,
@@ -87,14 +107,17 @@ class PositionService {
         created_at   INTEGER NOT NULL
       )
     ''');
-    await db.execute(
-        'CREATE INDEX idx_bookmarks_book_path ON bookmarks(book_path)');
+    // IF NOT EXISTS: a bare CREATE aborts onUpgrade with a DatabaseException,
+    // and since onUpgrade would keep failing on every launch there is no
+    // recovery path. Idempotence is what the version gate assumes.
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_bookmarks_book_path '
+        'ON bookmarks(book_path)');
   }
 
   @visibleForTesting
   static Future<void> createDriveTables(Database db) async {
     await db.execute('''
-      CREATE TABLE drive_books (
+      CREATE TABLE IF NOT EXISTS drive_books (
         folder_id       TEXT PRIMARY KEY,
         folder_name     TEXT NOT NULL,
         root_folder_id  TEXT NOT NULL,
@@ -105,7 +128,7 @@ class PositionService {
       )
     ''');
     await db.execute('''
-      CREATE TABLE drive_book_files (
+      CREATE TABLE IF NOT EXISTS drive_book_files (
         folder_id       TEXT NOT NULL,
         file_index      INTEGER NOT NULL,
         file_id         TEXT NOT NULL,
@@ -227,18 +250,22 @@ class PositionService {
 
   Future<void> updateBookStatus(String bookPath, BookStatus status) async {
     final db = await _database;
-    // Only update status column if the row already exists, otherwise insert.
-    final existing = await db.query('positions',
-        where: 'book_path = ?', whereArgs: [bookPath], limit: 1);
-    if (existing.isEmpty) {
+    // UPDATE first, and only insert when it changed nothing. The previous
+    // SELECT-then-branch was a read-modify-write with no transaction: two
+    // concurrent callers (e.g. _onPlaybackCompleted racing play()) could both
+    // observe isEmpty, and a savePosition landing between the SELECT and the
+    // UPDATE made the branch decision stale. Semantics are unchanged - the
+    // update path still deliberately does NOT bump updated_at, since an
+    // explicit status change is not a listen event and must not reorder the
+    // library by recency.
+    final changed = await db.update(
+      'positions',
+      {'status': status.name},
+      where: 'book_path = ?',
+      whereArgs: [bookPath],
+    );
+    if (changed == 0) {
       await setBookStatus(bookPath, status);
-    } else {
-      await db.update(
-        'positions',
-        {'status': status.name},
-        where: 'book_path = ?',
-        whereArgs: [bookPath],
-      );
     }
   }
 
@@ -288,10 +315,22 @@ class PositionService {
 
   static BookStatus _deriveStatus(int globalMs, int totalMs) {
     if (globalMs <= 0) return BookStatus.notStarted;
-    if (totalMs > 0 && globalMs >= totalMs - _finishedThresholdMs) {
+    // The 60 s tail allowance only makes sense for a book long enough to have
+    // one. For a 20 s clip the bound goes negative, so ANY progress at all
+    // satisfied it and the book reported as finished the moment you pressed
+    // play. Clamp the threshold to a fraction of the book instead.
+    if (totalMs > 0 && globalMs >= totalMs - _tailAllowance(totalMs)) {
       return BookStatus.finished;
     }
     return BookStatus.inProgress;
+  }
+
+  /// Trailing allowance for the "finished" threshold: [_finishedThresholdMs],
+  /// but never more than half the book, so short media cannot be reported
+  /// finished before it has meaningfully played.
+  static int _tailAllowance(int totalMs) {
+    final half = totalMs ~/ 2;
+    return _finishedThresholdMs < half ? _finishedThresholdMs : half;
   }
 
   // ── Bookmark CRUD ──────────────────────────────────────────────────────────

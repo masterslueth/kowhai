@@ -123,6 +123,128 @@ FILE "missing.mp3" MP3
       expect(books, isEmpty);
     });
 
+    test('.cue FILE directive cannot traverse out of the book folder', () async {
+      // A real file OUTSIDE the book folder that a traversal must not reach.
+      final outside = File('${tempDir.path}/secret.mp3');
+      await outside.writeAsBytes([]);
+
+      final bookDir = Directory('${tempDir.path}/Traversal Book');
+      await bookDir.create();
+      await File('${bookDir.path}/book.cue').writeAsString('''
+TITLE "Traversal Book"
+FILE "../secret.mp3" MP3
+  TRACK 01 AUDIO
+    TITLE "Chapter 1"
+    INDEX 01 00:00:00
+''');
+
+      final books = await scannerService.scanFolder(tempDir.path);
+      // The escaping reference resolves to nothing, so the book has no audio
+      // and is dropped rather than exposing an out-of-folder path.
+      expect(books, isEmpty);
+      for (final b in books) {
+        for (final f in b.audioFiles) {
+          expect(f, isNot(contains('secret.mp3')));
+        }
+      }
+    });
+
+    test('.cue FILE directive rejects absolute references', () async {
+      final target = File('${tempDir.path}/secret.mp3');
+      await target.writeAsBytes([]);
+
+      final bookDir = Directory('${tempDir.path}/Absolute Cue Book');
+      await bookDir.create();
+      final escaped = target.path.replaceAll(r'\', r'\\');
+      await File('${bookDir.path}/book.cue').writeAsString('''
+TITLE "Absolute Cue Book"
+FILE "$escaped" MP3
+  TRACK 01 AUDIO
+    TITLE "Chapter 1"
+    INDEX 01 00:00:00
+''');
+
+      final books = await scannerService.scanFolder(tempDir.path);
+      for (final b in books) {
+        for (final f in b.audioFiles) {
+          expect(f, isNot(contains('secret.mp3')));
+        }
+      }
+    });
+
+    test('.cue chapters are sorted ascending by start', () async {
+      final bookDir = Directory('${tempDir.path}/Unordered Cue');
+      await bookDir.create();
+      await File('${bookDir.path}/book.mp3').writeAsBytes([]);
+
+      // Deliberately out of order: chapter 2's INDEX precedes chapter 1's.
+      await File('${bookDir.path}/book.cue').writeAsString('''
+TITLE "Unordered Cue"
+FILE "book.mp3" MP3
+  TRACK 01 AUDIO
+    TITLE "Chapter One"
+    INDEX 01 30:00:00
+  TRACK 02 AUDIO
+    TITLE "Chapter Two"
+    INDEX 01 00:00:00
+''');
+
+      final books = await scannerService.scanFolder(tempDir.path);
+      expect(books, isNotEmpty);
+      final starts = books.first.chapters.map((c) => c.start).toList();
+      for (var i = 1; i < starts.length; i++) {
+        expect(starts[i], greaterThanOrEqualTo(starts[i - 1]),
+            reason: 'chapters must be monotonic for the binary search');
+      }
+    });
+
+    test('.cue disc TITLE is not used as the first chapter name', () async {
+      final bookDir = Directory('${tempDir.path}/Disc Title');
+      await bookDir.create();
+      await File('${bookDir.path}/book.mp3').writeAsBytes([]);
+
+      // Red Book grammar: the TITLE directly after FILE is the disc title;
+      // only a TITLE after a TRACK line names that track.
+      await File('${bookDir.path}/book.cue').writeAsString('''
+PERFORMER "Author"
+TITLE "The Book"
+FILE "book.mp3" MP3
+  TRACK 01 AUDIO
+    TITLE "Real Chapter One"
+    INDEX 01 00:00:00
+''');
+
+      final books = await scannerService.scanFolder(tempDir.path);
+      expect(books, isNotEmpty);
+      // Single-file books carry their names on `chapters` (chapterNames is
+      // only synthesised for multi-file books).
+      final chapterTitles = books.first.chapters.map((c) => c.title).toList();
+      expect(chapterTitles, contains('Real Chapter One'));
+      expect(chapterTitles, isNot(contains('The Book')));
+    });
+
+    test('.cue rejects out-of-range timestamps instead of producing negatives',
+        () async {
+      final bookDir = Directory('${tempDir.path}/Bad Timestamps');
+      await bookDir.create();
+      await File('${bookDir.path}/book.mp3').writeAsBytes([]);
+
+      await File('${bookDir.path}/book.cue').writeAsString('''
+TITLE "Bad Timestamps"
+FILE "book.mp3" MP3
+  TRACK 01 AUDIO
+    TITLE "Chapter One"
+    INDEX 01 00:-5:00
+''');
+
+      final books = await scannerService.scanFolder(tempDir.path);
+      for (final b in books) {
+        for (final c in b.chapters) {
+          expect(c.start.isNegative, isFalse);
+        }
+      }
+    });
+
     test('.cue metadata does not override embedded tags', () async {
       // If a .cue has a title/author but the audio file also provides them
       // via embedded metadata, embedded metadata wins.
