@@ -11,6 +11,31 @@ Future<({PositionService positionService, DriveBookRepository repo})>
   return (positionService: ps, repo: DriveBookRepository(ps));
 }
 
+/// Number of download-start events observed so far.
+int downloadingCount(List<DriveDownloadEvent> events) =>
+    events.where((e) => e.state == DriveDownloadState.downloading).length;
+
+/// Polls [condition] until it holds, failing with [reason] if it never does.
+///
+/// Replaces hard-coded sleeps in the retry tests. Those asserted an exact
+/// attempt count after a fixed wait, which is only long enough on an unloaded
+/// machine — the suite runs tests concurrently, so under load four 10 ms retries
+/// could overrun a 500 ms window and the count came back 3. That is a property
+/// of the test, not of the code under test, and it made CI intermittently red.
+Future<void> waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 15),
+  String? reason,
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('${reason ?? 'condition not met'} (timed out after $timeout)');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
 DriveBookRecord _book(String folderId) => testDriveBook(folderId);
 
 DriveFileRecord _fileRec(
@@ -95,19 +120,15 @@ void main() {
 
       await manager.enqueueAllFiles(folderId);
       // First attempt fails fast (unsigned DriveService) → retry scheduled.
-      await Future.delayed(const Duration(milliseconds: 50));
+      await waitUntil(() => downloadingCount(events) >= 1,
+          reason: 'first download attempt never started');
       await manager.cancelDownload(folderId);
-      final downloadsAtCancel = events
-          .where((e) => e.state == DriveDownloadState.downloading)
-          .length;
+      final downloadsAtCancel = downloadingCount(events);
 
-      // Wait well past the retry window.
-      await Future.delayed(const Duration(milliseconds: 400));
-
-      final downloadsAfterWindow = events
-          .where((e) => e.state == DriveDownloadState.downloading)
-          .length;
-      expect(downloadsAfterWindow, downloadsAtCancel,
+      // Wait well past the retry window, and assert nothing more arrives.
+      final settled = downloadsAtCancel;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(downloadingCount(events), settled,
           reason: 'a cancelled job must not resurrect after the retry delay');
     });
 
@@ -124,11 +145,9 @@ void main() {
 
       // First batch: initial attempt + 3 retries = 4 downloading events.
       await manager.enqueueAllFiles(folderId);
-      await Future.delayed(const Duration(milliseconds: 500));
-      final firstBatch = events
-          .where((e) => e.state == DriveDownloadState.downloading)
-          .length;
-      expect(firstBatch, 4);
+      await waitUntil(() => downloadingCount(events) >= 4,
+          reason: 'first batch never exhausted its retry budget');
+      expect(downloadingCount(events), 4);
 
       // Queue is idle now — cancelling must clear its flag.
       await manager.cancelDownload(folderId);
@@ -136,11 +155,9 @@ void main() {
       // Second batch must still get its full retry budget.
       events.clear();
       await manager.enqueueAllFiles(folderId);
-      await Future.delayed(const Duration(milliseconds: 500));
-      final secondBatch = events
-          .where((e) => e.state == DriveDownloadState.downloading)
-          .length;
-      expect(secondBatch, 4,
+      await waitUntil(() => downloadingCount(events) >= 4,
+          reason: 'second batch never exhausted its retry budget');
+      expect(downloadingCount(events), 4,
           reason: 'an idle-queue cancel must not disable future retries');
     });
 
@@ -156,11 +173,10 @@ void main() {
       manager.downloadEvents.listen(events.add);
 
       await manager.enqueueAllFiles(folderId);
-      await Future.delayed(const Duration(milliseconds: 500));
+      await waitUntil(() => downloadingCount(events) >= 4,
+          reason: 'retries never exhausted');
 
-      final attempts = events
-          .where((e) => e.state == DriveDownloadState.downloading)
-          .length;
+      final attempts = downloadingCount(events);
       expect(attempts, 4, reason: 'initial attempt + 3 retries');
       final files = await repo.getFilesForBook(folderId);
       expect(files.single.downloadState, DriveDownloadState.error);
